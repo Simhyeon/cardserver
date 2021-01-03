@@ -8,8 +8,11 @@ edition = "2018"
 
 [dependencies]
 futures = "0.3.8"
+rand = "0.8.0"
 serde = {version = "1.0.118", features = ["derive"]}
 serde_json = "1.0.61"
+strum = "0.20.0"
+strum_macros = "0.20.1"
 tokio = {version ="0.2.23", features =["full"]}
 uuid = {version = "0.8.1" , features =["v4"]}
 warp = "0.2.5"

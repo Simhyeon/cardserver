@@ -1,5 +1,6 @@
 mod models;
 mod handlers;
+mod test;
 
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
