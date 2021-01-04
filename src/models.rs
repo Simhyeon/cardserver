@@ -77,7 +77,7 @@ impl Game {
         // Calculate according to given player action.
         // Validate action if not then demand action again.
         match action {
-            PlayerAction::Pollcard => {
+            PlayerAction::Poll_Card => {
                 // TODO :: I'm not sure if creating json object from card array is appropriate
                 // or just try to make json object from simple array.
                 if let Some(card) = self.card_pool.poll_card() {
