@@ -26,7 +26,7 @@ impl Connection {
 }
 
 pub struct Game {
-    pub turn: Turn,
+    pub current_user: String,
     // TODO :: Refactor to use playerstat struct.
     pub creator: User,
     pub participant: Option<User>,
@@ -42,11 +42,22 @@ impl Game {
         // TODO :: Should poll cards several times.
         // before starting game.
         Self {  
-            turn: Turn::CREATOR,
+            current_user: cid.clone(),
             creator: User::new(cid, sender),
             participant: None,
             card_pool: CardPool::new(),
         }
+    }
+
+    pub fn broadcast_message(&self, msg: Message) {
+        if let None = self.participant {
+            return;
+        }
+
+        self.participant.as_ref().unwrap().sender.send(Ok(msg.clone()))
+            .expect("Failed to send message");
+        self.creator.sender.send(Ok(msg))
+            .expect("Failed to send message");
     }
 
     pub fn send_message(&self, user_id: String, msg: Message) {
@@ -66,18 +77,24 @@ impl Game {
         }
     }
 
-    pub fn receive_player_action(&mut self, uid: &str, action: PlayerAction) {
+    pub fn receive_player_action(&mut self, uid: &str, req: UserRequest) {
 
+        // If room is not complete, return
         if let None = self.participant {
             eprintln!("Tried to retrive action while room is not complete");
+            return;
+        }
+
+        // If given player action is not current turn's, return
+        if uid != self.current_user {
             return;
         }
 
         // TODO :: Make it work
         // Calculate according to given player action.
         // Validate action if not then demand action again.
-        match action {
-            PlayerAction::Poll_Card => {
+        match req.action {
+            PlayerAction::PollCard => {
                 // TODO :: I'm not sure if creating json object from card array is appropriate
                 // or just try to make json object from simple array.
                 if let Some(card) = self.card_pool.poll_card() {
@@ -93,8 +110,6 @@ impl Game {
                     // participant's turn
                     else {
                         self.participant.as_mut().unwrap().add_card(card.clone());
-                        let cards = serde_json::to_string(&self.participant.as_ref().unwrap().stat.cards)
-                            .expect("Failed to created cards json objects");
                         let res = serde_json::to_string(&ServerResponse{response_type: ResponseType::Card, value : ResponseValue::Card(card)})
                             .expect("Failed to create json response");
                         self.participant.as_ref().unwrap().sender.send( Ok(Message::text(res)) )
@@ -104,9 +119,37 @@ impl Game {
                     eprintln!("Failed to poll card from card pool");
                 }
             }
+            PlayerAction::BetCall => {
+                if let Some(number) = req.value {
+                    if uid == self.creator.id {
+                        self.creator.bet(number);
+                    } else {
+                        self.participant.as_mut().unwrap().bet(number);
+                    }
+                } else {
+                    eprintln!("Invalid format : Bet_Call type requires value to be set.");
+                }
+            }
+            PlayerAction::BetRaise => {
+                if let Some(number) = req.value {
+                    if uid == self.creator.id {
+                        self.creator.bet(number);
+                    } else {
+                        self.participant.as_mut().unwrap().bet(number);
+                    }
+                } else {
+                    eprintln!("Invalid format : Bet_Call type requires value to be set.");
+                }
+            }
+            PlayerAction::Fold => {
+                if uid == self.creator.id {
+                    self.creator.fold();
+                } else {
+                    self.participant.as_mut().unwrap().fold();
+                }
+            }
             PlayerAction::Message => {
                 if uid == self.creator.id {
-
                     self.participant.as_ref().unwrap().sender.send(Ok(Message::text("Ping from opponent")))
                         .expect("Failed to send message");
                 }
@@ -117,7 +160,7 @@ impl Game {
                 }
             }
             _ => {
-                eprintln!("Action not found which is {:?}", action);
+                eprintln!("Action not found which is {:?}", req.action);
             }
         }
     }
@@ -163,17 +206,16 @@ impl User {
     pub fn bet(&mut self, amount: u32) {
         self.stat.bet.replace(amount);
     }
+
+    pub fn fold(&mut self) {
+        self.stat.bet = None;
+    }
 }
 
 pub struct PlayerStat {
     pub cash : u32,
     pub bet : Option<u32>,
     pub cards: Vec<Card>,
-}
-
-pub enum Turn {
-    CREATOR,
-    PARTICIPANT,
 }
 
 impl PlayerStat {
@@ -229,6 +271,11 @@ pub enum CardType {
     Clover,
 }
 
+// TODO :: Make this follow real world poker rules
+pub enum Turn {
+
+}
+
 pub enum CardCombination {
     None,
     Fullhouse,
@@ -243,9 +290,9 @@ pub enum CardCombination {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum PlayerAction {
     Message,
-    Poll_Card,
-    Bet_Raise,
-    Bet_Call,
+    PollCard,
+    BetRaise,
+    BetCall,
     Fold,
 }
 
