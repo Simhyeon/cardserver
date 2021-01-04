@@ -102,7 +102,7 @@ pub async fn join(ws: WebSocket, room_id: String, conn: Connections) {
         //user_message(&room_id, &user_id, msg, &conn).await;
     }
 
-    user_disconnected(&user_id, &conn).await;
+    user_disconnected(&room_id, &conn).await;
 }
 
 pub async fn user_request(room_id: &str, user_id: &str, msg: Message, conn: &Connections) {
@@ -124,7 +124,7 @@ pub async fn user_request(room_id: &str, user_id: &str, msg: Message, conn: &Con
 
     // New message from this user, send it to everyone else (except same uid)...
     conn.lock().unwrap().get_mut(room_id).unwrap()
-        .game.receive_player_action(&user_id, req.action);
+        .game.receive_player_action(&user_id, req);
 }
 
 pub async fn _user_message(room_id: &str, user_id: &str, msg: Message, conn: &Connections) {
@@ -142,11 +142,11 @@ pub async fn _user_message(room_id: &str, user_id: &str, msg: Message, conn: &Co
         .game.send_message(user_id.to_string(), Message::text(new_msg));
 }
 
-pub async fn user_disconnected(user_id: &str, conn: &Connections) {
-    eprintln!("good bye user: {}", user_id);
+pub async fn user_disconnected(room_id: &str, conn: &Connections) {
+    eprintln!("User disconnected");
 
     // Stream closed up, so remove from the user list
-    conn.lock().unwrap().remove(user_id);
+    conn.lock().unwrap().remove(room_id);
 }
 
 pub fn with_conns(conn: Connections) -> impl Filter<Extract = (Connections,), Error = Infallible> + Clone {
