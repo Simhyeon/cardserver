@@ -5,7 +5,6 @@
 Conclusion: refactored to include enumerator varaible.
 * [x] Refactor recieve_player_action to get request not only request's action.
 * [ ] Make game complete as a text based without unity's gui.
-	* [x] Player can poll cards
 	* [x] Player can bet with raise or call.
 	* [x] Player can fold.
 	* [ ] Player can win.

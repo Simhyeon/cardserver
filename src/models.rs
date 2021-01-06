@@ -153,7 +153,7 @@ impl Game {
                     user.send_message("Ping from opponent");
                 }
             }
-            // For Check, Raise, Call
+            // For Check, Raise, Call(Raise)
             _ => {
                 if let Some(amount) = req.value {
                     user.bet(amount);
@@ -174,19 +174,19 @@ impl Game {
 
         if let PlayerAction::Message = req.action{}
         else {
-            user.current_action.replace(req.action);
+            user.current_action = req.action;
+
 
             // TODO :: Check if server can change the state 
             // thus make Pending current state.
-            if let Some(action1) = user.current_action {
-                if let Some(action2) = opp.current_action {
-                    if action1 == action2 {
-                        pending = Pending(Some(self.state));
-                    }
-                }
-            }
             // if all players' have bet.
             // change the state.
+            if user.current_action == opp.current_action ||
+                user.current_action == PlayerAction::Fold ||
+                    opp.current_action == PlayerAction::Fold {
+                        eprintln!("PENDING!");
+                        pending = Pending(Some(self.state));
+            }
         }
 
         pending
@@ -205,7 +205,7 @@ impl Game {
 
 pub struct User {
     pub id : String,
-    pub current_action: Option<PlayerAction>,
+    pub current_action: PlayerAction,
     pub sender : mpsc::UnboundedSender<Result<Message, warp::Error>>,
     pub stat: PlayerStat,
 }
@@ -217,7 +217,7 @@ impl User {
     ) -> Self {
         Self {  
             id,
-            current_action: None,
+            current_action: PlayerAction::None,
             sender,
             stat: PlayerStat::new(),
         }
@@ -339,11 +339,12 @@ pub enum CardCombination {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum PlayerAction {
+    None,
     Message,
     Fold,
     Check,
     Raise,
-    Call,
+    // Call, -> Call is conceptual and it is processed as if raise
 }
 
 #[derive(Serialize, Deserialize)]
@@ -384,6 +385,7 @@ pub enum ResponseValue {
 
 pub struct Pending(Option<GameState>);
 
+#[derive(Clone, Copy)]
 pub enum GameState {
     Flop,
     Turn,
