@@ -6,7 +6,11 @@ use strum_macros::EnumIter;
 use rand::prelude::*;
 
 const CARD_NUMBER : usize = 14;
+const DEFAULT_HP : u32 = 30;
 
+// TODO :: Actually single Connection hashmap is really inefficient.
+// Rather make it an array of multiple hashamp. 
+// Or implement multi refernece approcach.
 pub struct Connection {
     pub room_id: String,
     pub game: Game,
@@ -26,10 +30,10 @@ impl Connection {
 }
 
 pub struct Game {
-    pub current_user: String,
-    // TODO :: Refactor to use playerstat struct.
+    pub state: GameState,
     pub creator: User,
     pub participant: Option<User>,
+    pub community: Vec<Card>,
     pub card_pool : CardPool,
 }
 
@@ -42,127 +46,150 @@ impl Game {
         // TODO :: Should poll cards several times.
         // before starting game.
         Self {  
-            current_user: cid.clone(),
+            state: GameState::Flop,
             creator: User::new(cid, sender),
             participant: None,
+            community: vec![],
             card_pool: CardPool::new(),
         }
     }
 
-    pub fn broadcast_message(&self, msg: Message) {
+    pub fn init_game(&mut self) {
+        if let None = self.participant {
+            eprintln!("Tried to init a game with no participant.");
+            return;
+        }
+
+        // NOTE
+        // This can theoritically fail 
+        // However card pool is always re initialized every round
+        // So in intended scenario, it never fails.
+        self.community = self.card_pool.poll_cards(3).unwrap();
+        self.creator.stat.cards = self.card_pool.poll_cards(2).unwrap();
+        self.participant.as_mut().unwrap().stat.cards = self.card_pool.poll_cards(2).unwrap();
+
+        let res_community = ServerResponse::new_json(
+            ResponseType::Community, 
+            ResponseValue::Card(self.community.clone())
+        ).expect("Failed to create server response");
+        self.creator.send_message(&res_community);
+        self.participant.as_ref().unwrap().send_message(&res_community);
+
+        let res_creator = ServerResponse::new_json(
+            ResponseType::Hand, 
+            ResponseValue::Card(self.creator.stat.cards.clone())
+        ).expect("Failed to create server response");
+        self.creator.send_message(&res_creator);
+
+        let res_part = ServerResponse::new_json(
+            ResponseType::Hand, 
+            ResponseValue::Card(self.participant.as_ref().unwrap().stat.cards.clone())
+        ).expect("Failed to create server response");
+        self.participant.as_ref().unwrap().send_message(&res_part);
+    }
+
+    pub fn broadcast_message(&self, msg: &str) {
         if let None = self.participant {
             return;
         }
 
-        self.participant.as_ref().unwrap().sender.send(Ok(msg.clone()))
-            .expect("Failed to send message");
-        self.creator.sender.send(Ok(msg))
-            .expect("Failed to send message");
+        self.participant.as_ref().unwrap().send_message(msg);
+        self.creator.send_message(msg);
     }
 
-    pub fn send_message(&self, user_id: String, msg: Message) {
-        if let None = self.participant {
-            return;
-        }
-
-        // From creator to participant
-        if user_id == self.creator.id {
-            self.participant.as_ref().unwrap().sender.send(Ok(msg))
-                .expect("Failed to send message");
-        } 
-        // From participant to creator
-        else {
-            self.creator.sender.send(Ok(msg))
-                .expect("Failed to send message");
+    pub fn next_state(&mut self, pending: Pending) {
+        if let Pending(Some(state)) = pending {
+            match state {
+                GameState::Flop => {
+                    self.state = GameState::Turn;
+                }
+                GameState::Turn => {
+                    self.state = GameState::River;
+                }
+                GameState::River => {
+                    self.state = GameState::ShowDown;
+                }
+                GameState::ShowDown => {
+                    self.state = GameState::Flop;
+                }
+            }
         }
     }
 
-    pub fn receive_player_action(&mut self, uid: &str, req: UserRequest) {
+    pub fn receive_player_action(&mut self, uid: &str, req: UserRequest) -> Pending {
 
         // If room is not complete, return
         if let None = self.participant {
             eprintln!("Tried to retrive action while room is not complete");
-            return;
+            return Pending(None);
+        }
+        
+        let user: &mut User;
+        let opp: &mut User;
+
+        if uid == self.creator.id {
+            user = &mut self.creator;
+            opp = self.participant.as_mut().unwrap();
+        } else {
+            user = self.participant.as_mut().unwrap();
+            opp = &mut self.creator;
         }
 
-        // If given player action is not current turn's, return
-        if uid != self.current_user {
-            return;
-        }
+        let mut pending = Pending(None);
 
         // TODO :: Make it work
         // Calculate according to given player action.
         // Validate action if not then demand action again.
         match req.action {
-            PlayerAction::PollCard => {
-                // TODO :: I'm not sure if creating json object from card array is appropriate
-                // or just try to make json object from simple array.
-                if let Some(card) = self.card_pool.poll_card() {
-                    eprintln!("Successfully polled card from cardpool");
-                    // Creator's turn
-                    if uid == self.creator.id {
-                        self.creator.add_card(card.clone());
-                        let res = serde_json::to_string(&ServerResponse{response_type: ResponseType::Card, value : ResponseValue::Card(card)})
-                            .expect("Failed to create json response");
-                        self.creator.sender.send( Ok(Message::text(res)) )
-                            .expect("Failed to send response");
-                    }
-                    // participant's turn
-                    else {
-                        self.participant.as_mut().unwrap().add_card(card.clone());
-                        let res = serde_json::to_string(&ServerResponse{response_type: ResponseType::Card, value : ResponseValue::Card(card)})
-                            .expect("Failed to create json response");
-                        self.participant.as_ref().unwrap().sender.send( Ok(Message::text(res)) )
-                            .expect("Failed to send response");
-                    }
-                } else {
-                    eprintln!("Failed to poll card from card pool");
-                }
-            }
-            PlayerAction::BetCall => {
-                if let Some(number) = req.value {
-                    if uid == self.creator.id {
-                        self.creator.bet(number);
-                    } else {
-                        self.participant.as_mut().unwrap().bet(number);
-                    }
-                } else {
-                    eprintln!("Invalid format : Bet_Call type requires value to be set.");
-                }
-            }
-            PlayerAction::BetRaise => {
-                if let Some(number) = req.value {
-                    if uid == self.creator.id {
-                        self.creator.bet(number);
-                    } else {
-                        self.participant.as_mut().unwrap().bet(number);
-                    }
-                } else {
-                    eprintln!("Invalid format : Bet_Call type requires value to be set.");
-                }
-            }
             PlayerAction::Fold => {
-                if uid == self.creator.id {
-                    self.creator.fold();
-                } else {
-                    self.participant.as_mut().unwrap().fold();
-                }
+                user.fold();
             }
             PlayerAction::Message => {
-                if uid == self.creator.id {
-                    self.participant.as_ref().unwrap().sender.send(Ok(Message::text("Ping from opponent")))
-                        .expect("Failed to send message");
+                if uid == user.id {
+                    opp.send_message("Ping from opponent");
                 }
                 // participant's turn
                 else {
-                    self.creator.sender.send(Ok(Message::text("Ping from opponent")))
-                        .expect("Failed to send message");
+                    user.send_message("Ping from opponent");
                 }
             }
+            // For Check, Raise, Call
             _ => {
-                eprintln!("Action not found which is {:?}", req.action);
+                if let Some(amount) = req.value {
+                    user.bet(amount);
+
+                    if let PlayerAction::Raise = req.action {
+                        opp.send_message(
+                            &ServerResponse::new_json(
+                                ResponseType::Raise, 
+                                ResponseValue::Raise(amount)
+                            ).expect("Failed to create server response"));
+                    }
+                } else {
+                    eprintln!("Invalid syntax");
+                }
+
             }
         }
+
+        if let PlayerAction::Message = req.action{}
+        else {
+            user.current_action.replace(req.action);
+
+            // TODO :: Check if server can change the state 
+            // thus make Pending current state.
+            if let Some(action1) = user.current_action {
+                if let Some(action2) = opp.current_action {
+                    if action1 == action2 {
+                        pending = Pending(Some(self.state));
+                    }
+                }
+            }
+            // if all players' have bet.
+            // change the state.
+        }
+
+        pending
     }
 
     pub fn join_game(
@@ -178,6 +205,7 @@ impl Game {
 
 pub struct User {
     pub id : String,
+    pub current_action: Option<PlayerAction>,
     pub sender : mpsc::UnboundedSender<Result<Message, warp::Error>>,
     pub stat: PlayerStat,
 }
@@ -189,6 +217,7 @@ impl User {
     ) -> Self {
         Self {  
             id,
+            current_action: None,
             sender,
             stat: PlayerStat::new(),
         }
@@ -196,7 +225,7 @@ impl User {
 
     // TODO
     pub fn get_card_combination(&self) -> CardCombination {
-        CardCombination::None
+        CardCombination::HighCard
     }
 
     pub fn add_card(&mut self, card: Card) {
@@ -204,16 +233,25 @@ impl User {
     }
 
     pub fn bet(&mut self, amount: u32) {
-        self.stat.bet.replace(amount);
+        if let Some(value) = self.stat.bet {
+            self.stat.bet.replace(value+amount);
+        } else {
+            self.stat.bet.replace(amount);
+        }
     }
 
     pub fn fold(&mut self) {
         self.stat.bet = None;
     }
+
+    pub fn send_message(&self, msg :&str) {
+        self.sender.send(Ok(Message::text(msg)))
+            .expect("Failed to send message");
+    }
 }
 
 pub struct PlayerStat {
-    pub cash : u32,
+    pub hp: u32,
     pub bet : Option<u32>,
     pub cards: Vec<Card>,
 }
@@ -221,7 +259,7 @@ pub struct PlayerStat {
 impl PlayerStat {
     pub fn new() -> Self {
         Self {  
-            cash: 0,
+            hp: DEFAULT_HP,
             bet: None,
             cards: vec![],
         }
@@ -255,6 +293,22 @@ impl CardPool {
 
         Some(self.cards.remove(index))
     }
+
+    pub fn poll_cards(&mut self, count: usize) -> Option<Vec<Card>> {
+        if self.cards.len() == 0 || self.cards.len() < count {return None;}
+
+        let mut cards = vec![];
+
+        // TODO ::: 
+        // This is not necessarily a great optimization since creation of thread local
+        // generator is not lightoperation. 
+        for _ in 0..count {
+            let index = rand::thread_rng().gen_range(0..self.cards.len());
+            cards.push( self.cards.remove(index) );
+        }
+
+        Some(cards)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
@@ -271,35 +325,25 @@ pub enum CardType {
     Clover,
 }
 
-// TODO :: Make this follow real world poker rules
-pub enum Turn {
-
-}
-
 pub enum CardCombination {
-    None,
-    Fullhouse,
-    Double,
-    Triple,
+    HighCard,
+    Pair,
+    TwoPair,
+    ThreeOfaKind,
+    FullHouse,
     Straight,
     Flush,
     Sflush,
-    Rsflush,
+    Rflush,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum PlayerAction {
     Message,
-    PollCard,
-    BetRaise,
-    BetCall,
     Fold,
-}
-
-#[derive(Serialize, Deserialize)]
-pub enum ResponseType {
-    Card,
-    Message,
+    Check,
+    Raise,
+    Call,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -309,14 +353,40 @@ pub struct UserRequest {
 }
 
 #[derive(Serialize, Deserialize)]
+pub enum ResponseType {
+    Community,
+    Hand,
+    Message,
+    Raise,
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct ServerResponse {
     pub response_type: ResponseType,
     pub value: ResponseValue,
 }
 
+impl ServerResponse{
+    pub fn new_json(response_type: ResponseType, value: ResponseValue) -> Result<String, serde_json::Error> {
+        serde_json::to_string(&ServerResponse {
+            response_type,
+            value
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum ResponseValue {
     Message(String),
-    Card(Card),
-    Bet(u32),
+    Card(Vec<Card>),
+    Raise(u32),
+}
+
+pub struct Pending(Option<GameState>);
+
+pub enum GameState {
+    Flop,
+    Turn,
+    River,
+    ShowDown,
 }

@@ -78,10 +78,15 @@ pub async fn join(ws: WebSocket, room_id: String, conn: Connections) {
     if let Some(connection) = conn.lock().unwrap().get_mut(&room_id) {
         // Set connection into room
         connection.game.join_game(user_id.clone(), server_tx);
+        // Initialize game.
+        // Which make community field and hand of each players 
+        // And also sends card information to each clients.
+        connection.game.init_game();
     } else {
         // Reject
     }
 
+    // SPawn a thread for forwarding stream from server reciever to user transmitter.
     tokio::task::spawn( server_rx.forward(user_tx).map(|result| {
         if let Err(e) = result {
             eprintln!("websocket error: {:?}", e);
