@@ -1,3 +1,5 @@
+# Need to change commit strategy
+
 # Make web socket server complete
 * [x] Refactor model of connection into composition of users struct.
 * [x] Eanble other client to connect to existing room with given id
