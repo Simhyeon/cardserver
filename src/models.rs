@@ -1,10 +1,13 @@
+use std::time::Duration;
 use serde::{ Deserialize , Serialize};
 use tokio::sync::mpsc;
 use warp::ws::Message;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use rand::prelude::*;
+use uuid::Uuid;
 
+const BET_TIME : u64 = 15;
 const CARD_NUMBER : usize = 14;
 const DEFAULT_HP : u32 = 30;
 
@@ -20,17 +23,21 @@ impl Connection {
     pub fn new(
         creator_id: String, 
         room_id: String, 
-        sender: mpsc::UnboundedSender<Result<Message, warp::Error>>
+        sender: mpsc::UnboundedSender<Result<Message, warp::Error>>,
+        internal_sender: mpsc::UnboundedSender<Result<Message, warp::Error>>
     ) -> Self {
         Self {  
             room_id,
-            game: Game::new(creator_id, sender),
+            game: Game::new(creator_id, sender, internal_sender),
         }
     }
 }
 
 pub struct Game {
     pub state: GameState,
+    pub state_id: Option<String>,
+    pub state_extend: bool,
+    pub internal_sender: mpsc::UnboundedSender<Result<Message, warp::Error>>,
     pub creator: User,
     pub participant: Option<User>,
     pub community: Vec<Card>,
@@ -41,17 +48,35 @@ pub struct Game {
 impl Game {
     pub fn new(
         cid: String, 
-        sender: mpsc::UnboundedSender<Result<Message, warp::Error>>
+        sender: mpsc::UnboundedSender<Result<Message, warp::Error>>,
+        internal_sender: mpsc::UnboundedSender<Result<Message, warp::Error>>,
     ) -> Self {
         // TODO :: Should poll cards several times.
         // before starting game.
         Self {  
             state: GameState::Flop,
+            state_id: None,
+            state_extend: false,
+            internal_sender,
             creator: User::new(cid, sender),
             participant: None,
             community: vec![],
             card_pool: CardPool::new(),
         }
+    }
+
+    pub fn set_state_id_and_send(&mut self) {
+        // Set State id and send messages to each clients.
+        self.state_id.replace(
+            Uuid::new_v4().to_simple().to_string()
+        );
+
+        let res_state = ServerResponse::new_json(
+            ResponseType::State,
+            ResponseValue::State(self.state_id.as_ref().unwrap().clone())
+        ).expect("Failed to create resonse");
+        self.creator.send_message(&res_state);
+        self.participant.as_ref().unwrap().send_message(&res_state);
     }
 
     pub fn init_game(&mut self) {
@@ -86,6 +111,25 @@ impl Game {
             ResponseValue::Card(self.participant.as_ref().unwrap().stat.cards.clone())
         ).expect("Failed to create server response");
         self.participant.as_ref().unwrap().send_message(&res_part);
+
+        self.set_state_id_and_send();
+
+        // Set timeout by sending request through internal channel
+        let req_timeout =InternalRequest::new_json(IntReqType::TimeOut, IntReqValue::Duration(BET_TIME))
+            .expect("Failed to create internal request");
+        let result = self.internal_sender.send(Ok(Message::text(req_timeout)));
+        match result {
+            Ok(()) => {
+                eprintln!("Successfully sent internal request");
+            }
+            Err(_) => {
+                eprintln!("Couldn't send internal request");
+            }
+        }
+        // TODO Delete this line
+        // This is for reference.
+        //self.internal_sender.send(Ok(Message::text(req_timeout)))
+            //.expect("Failed to send internal request");
     }
 
     pub fn broadcast_message(&self, msg: &str) {
@@ -97,7 +141,26 @@ impl Game {
         self.creator.send_message(msg);
     }
 
-    pub fn next_state(&mut self, pending: Pending) {
+    pub fn next_state(&mut self) {
+        match self.state {
+            GameState::Flop => {
+                self.state = GameState::Turn;
+            }
+            GameState::Turn => {
+                self.state = GameState::River;
+            }
+            GameState::River | GameState::Fold => {
+                self.state = GameState::ShowDown;
+            }
+            GameState::ShowDown => {
+                self.state = GameState::Flop;
+            }
+        }
+
+        self.set_state_id_and_send();
+    }
+
+    pub fn pending_next_state(&mut self, pending: Pending) {
         if let Pending(Some(state)) = pending {
             match state {
                 GameState::Flop => {
@@ -106,17 +169,28 @@ impl Game {
                 GameState::Turn => {
                     self.state = GameState::River;
                 }
-                GameState::River => {
+                GameState::River | GameState::Fold => {
                     self.state = GameState::ShowDown;
                 }
                 GameState::ShowDown => {
                     self.state = GameState::Flop;
                 }
             }
+
+            // TODO 
+            // Do something necessary for initialization
+
+            self.set_state_id_and_send();
         }
     }
 
     pub fn receive_player_action(&mut self, uid: &str, req: UserRequest) -> Pending {
+
+        // If state is different from current state,
+        // It means request is outdated or modified.
+        if &req.state_id != self.state_id.as_ref().unwrap() {
+            return Pending(None);
+        }
 
         // If room is not complete, return
         if let None = self.participant {
@@ -164,6 +238,9 @@ impl Game {
                                 ResponseType::Raise, 
                                 ResponseValue::Raise(amount)
                             ).expect("Failed to create server response"));
+
+                        // And lengthen timeout period.
+                        self.state_extend = true;
                     }
                 } else {
                     eprintln!("Invalid syntax");
@@ -349,12 +426,24 @@ pub enum PlayerAction {
 
 #[derive(Serialize, Deserialize)]
 pub struct UserRequest {
+    pub state_id: String,
     pub action: PlayerAction,
     pub value: Option<u32>,
 }
 
+impl UserRequest{
+    pub fn dummy() -> Self {
+        Self {
+            state_id: "".to_string(),
+            action: PlayerAction::None,
+            value: None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum ResponseType {
+    State,
     Community,
     Hand,
     Message,
@@ -378,6 +467,7 @@ impl ServerResponse{
 
 #[derive(Serialize, Deserialize)]
 pub enum ResponseValue {
+    State(String),
     Message(String),
     Card(Vec<Card>),
     Raise(u32),
@@ -391,4 +481,41 @@ pub enum GameState {
     Turn,
     River,
     ShowDown,
+    Fold,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct InternalRequest {
+    pub request_type :IntReqType,
+    pub value: IntReqValue,
+}
+
+impl InternalRequest {
+    pub fn dummy() -> Self {
+        Self {
+            request_type: IntReqType::None,
+            value: IntReqValue::None,
+        }
+    }
+
+    pub fn new_json(request_type: IntReqType, value: IntReqValue) -> Result<String, serde_json::Error> {
+        serde_json::to_string(&InternalRequest {
+            request_type,
+            value
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum IntReqType {
+    None,
+    Message,
+    TimeOut,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum IntReqValue {
+    None,
+    Message(String),
+    Duration(u64),
 }
