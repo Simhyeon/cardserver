@@ -215,21 +215,6 @@ pub async fn user_request(room_id: &str, user_id: &str, msg: Message, conn: &Con
     }
 }
 
-//pub async fn _user_message(room_id: &str, user_id: &str, msg: Message, conn: &Connections) {
-    //// Skip any non-Text messages...
-    //let msg = if let Ok(s) = msg.to_str() {
-        //s
-    //} else {
-        //return;
-    //};
-
-    //let new_msg = format!("From {}, Message : {}", user_id, msg);
-
-    //// New message from this user, send it to everyone else (except same uid)...
-    //conn.lock().unwrap().get(room_id).unwrap()
-        //.game.send_message(user_id.to_string(), Message::text(new_msg));
-//}
-
 pub async fn user_disconnected(room_id: &str, conn: &Connections) {
     eprintln!("User disconnected");
 

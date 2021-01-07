@@ -11,6 +11,8 @@ const BET_TIME : u64 = 15;
 const CARD_NUMBER : usize = 14;
 const DEFAULT_HP : u32 = 30;
 
+// TODO :: Make submodels
+
 // TODO :: Actually single Connection hashmap is really inefficient.
 // Rather make it an array of multiple hashamp. 
 // Or implement multi refernece approcach.
@@ -73,7 +75,7 @@ impl Game {
 
         let res_state = ServerResponse::new_json(
             ResponseType::State,
-            ResponseValue::State(self.state_id.as_ref().unwrap().clone())
+            ResponseValue::State((self.state ,self.state_id.as_ref().unwrap().clone()))
         ).expect("Failed to create resonse");
         self.creator.send_message(&res_state);
         self.participant.as_ref().unwrap().send_message(&res_state);
@@ -162,6 +164,7 @@ impl Game {
 
     pub fn pending_next_state(&mut self, pending: Pending) {
         if let Pending(Some(state)) = pending {
+            eprintln!("It's pending, step to next state");
             match state {
                 GameState::Flop => {
                     self.state = GameState::Turn;
@@ -467,7 +470,7 @@ impl ServerResponse{
 
 #[derive(Serialize, Deserialize)]
 pub enum ResponseValue {
-    State(String),
+    State(( GameState , String)),
     Message(String),
     Card(Vec<Card>),
     Raise(u32),
@@ -475,7 +478,7 @@ pub enum ResponseValue {
 
 pub struct Pending(Option<GameState>);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub enum GameState {
     Flop,
     Turn,
