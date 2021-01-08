@@ -156,29 +156,30 @@ pub async fn internal_request(room_id: &str, msg: Message, conn: &Connections) {
         // Such that internal_request doesn't have to wait for multiple
         // times before completion.
         IntReqType::TimeOut => {
-            if let IntReqValue::Duration(count) = req.value {
-                eprintln!("Wait for {} seconds", count);
-                tokio::time::delay_for(std::time::Duration::from_secs(count)).await;
+            if let IntReqValue::TimeOut(time_out) = req.value {
+                eprintln!("Wait for {:?} seconds", time_out.duration);
 
-                let mut wait_more: bool = false;
-                // This is to drop lock and wait for time if necessary
-                // and re-acquire lock later
-                {
-                    let mut hash = conn.lock().unwrap();
-                    eprintln!("{:?}", hash.hasher());
-                    let connection = hash.get_mut(room_id).unwrap();
-                    wait_more = connection.game.state_extend;
-                    if !wait_more {
-                        connection.game.next_state();
+                // Create a new task, namely concurrent workflow
+                // so that timeout delay is done asynchronously
+                // while internal_channel can recieve another request
+                let conn_clone = conn.clone();
+                let room_id_clone = room_id.clone().to_string();
+                tokio::task::spawn(async move{
+                    tokio::time::delay_for(std::time::Duration::from_secs(time_out.duration.as_secs())).await;
+
+                    // Get conection
+                    let mut hash = conn_clone.lock().unwrap();
+                    if let Some(connection) = hash.get_mut(&room_id_clone) {
+                        // If state has been extended ignore request and drop.
+                        if connection.game.state_extend {
+                            connection.game.state_extend = false;
+                        } else {
+                            connection.game.next_state(&time_out.state_id);
+                        }
+                    } else {
+                        eprintln!("Skipped request because connection lost");
                     }
-                }
-
-                if wait_more {
-                    tokio::time::delay_for(std::time::Duration::from_secs(count)).await;
-                    let mut hash = conn.lock().unwrap();
-                    let connection = hash.get_mut(room_id).unwrap();
-                    connection.game.next_state();
-                }
+                });
             } else {
                 eprintln!("Cannot not find duration value from timeout request");
             }
@@ -205,6 +206,7 @@ pub async fn user_request(room_id: &str, user_id: &str, msg: Message, conn: &Con
     }
 
     eprintln!("Received user request");
+    eprintln!("{:?}", req);
     let mut hash = conn.lock().unwrap();
     if let Some(connection) = hash.get_mut(room_id) {
         // New message from this user, send it to everyone else (except same uid)...

@@ -117,8 +117,10 @@ impl Game {
         self.set_state_id_and_send();
 
         // Set timeout by sending request through internal channel
-        let req_timeout =InternalRequest::new_json(IntReqType::TimeOut, IntReqValue::Duration(BET_TIME))
-            .expect("Failed to create internal request");
+        let req_timeout =InternalRequest::new_json(
+            IntReqType::TimeOut, 
+            IntReqValue::TimeOut(TimeOut{duration: std::time::Duration::from_secs(BET_TIME), state_id: self.state_id.as_ref().unwrap().clone()})
+        ).expect("Failed to create internal request");
         let result = self.internal_sender.send(Ok(Message::text(req_timeout)));
         match result {
             Ok(()) => {
@@ -128,10 +130,6 @@ impl Game {
                 eprintln!("Couldn't send internal request");
             }
         }
-        // TODO Delete this line
-        // This is for reference.
-        //self.internal_sender.send(Ok(Message::text(req_timeout)))
-            //.expect("Failed to send internal request");
     }
 
     pub fn broadcast_message(&self, msg: &str) {
@@ -143,7 +141,14 @@ impl Game {
         self.creator.send_message(msg);
     }
 
-    pub fn next_state(&mut self) {
+    pub fn next_state(&mut self, state_id : &str) {
+        // This should work in normal cases.
+        // However it might be used in not desired
+        // situations. Then error handing should be properly 
+        // implemented.
+        if self.state_id.as_ref().unwrap() != state_id {
+            return;
+        }
         match self.state {
             GameState::Flop => {
                 self.state = GameState::Turn;
@@ -159,6 +164,7 @@ impl Game {
             }
         }
 
+        self.clear_user_status();
         self.set_state_id_and_send();
     }
 
@@ -182,7 +188,7 @@ impl Game {
 
             // TODO 
             // Do something necessary for initialization
-
+            self.clear_user_status();
             self.set_state_id_and_send();
         }
     }
@@ -242,8 +248,30 @@ impl Game {
                                 ResponseValue::Raise(amount)
                             ).expect("Failed to create server response"));
 
+                        user.send_message(
+                            &ServerResponse::new_json(
+                                ResponseType::Delay, 
+                                ResponseValue::Number(BET_TIME as i32)
+                            ).expect("Failed to create server response"));
+
                         // And lengthen timeout period.
+                        // Ths enables tokio tasks that wait for delay, can
+                        // halt their action after the delay.
                         self.state_extend = true;
+
+                        let req_timeout =InternalRequest::new_json(
+                            IntReqType::TimeOut, 
+                            IntReqValue::TimeOut(TimeOut{duration: std::time::Duration::from_secs(BET_TIME), state_id: self.state_id.as_ref().unwrap().clone()})
+                        ).expect("Failed to create internal request");
+                        let result = self.internal_sender.send(Ok(Message::text(req_timeout)));
+                        match result {
+                            Ok(()) => {
+                                eprintln!("Successfully sent internal request");
+                            }
+                            Err(_) => {
+                                eprintln!("Couldn't send internal request");
+                            }
+                        }
                     }
                 } else {
                     eprintln!("Invalid syntax");
@@ -254,8 +282,11 @@ impl Game {
 
         if let PlayerAction::Message = req.action{}
         else {
-            user.current_action = req.action;
-
+            if req.action == PlayerAction::Call {
+                user.current_action = PlayerAction::Raise;
+            } else {
+                user.current_action = req.action;
+            }
 
             // TODO :: Check if server can change the state 
             // thus make Pending current state.
@@ -280,6 +311,15 @@ impl Game {
         self.participant.replace(User::new(id, sender));
 
         // TODO Start a game.
+    }
+
+    fn clear_user_status(&mut self) {
+        if let None =self.participant {
+            eprintln!("Invalid work flow should call function clear_user_status when participant is not empty");
+            return;
+        }
+        self.creator.current_action = PlayerAction::None;
+        self.participant.as_mut().unwrap().current_action = PlayerAction::None;
     }
 }
 
@@ -312,6 +352,7 @@ impl User {
         self.stat.cards.push(card);
     }
 
+    // Bet should be incremental
     pub fn bet(&mut self, amount: u32) {
         if let Some(value) = self.stat.bet {
             self.stat.bet.replace(value+amount);
@@ -424,10 +465,10 @@ pub enum PlayerAction {
     Fold,
     Check,
     Raise,
-    // Call, -> Call is conceptual and it is processed as if raise
+    Call, 
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct UserRequest {
     pub state_id: String,
     pub action: PlayerAction,
@@ -451,6 +492,7 @@ pub enum ResponseType {
     Hand,
     Message,
     Raise,
+    Delay,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -474,6 +516,7 @@ pub enum ResponseValue {
     Message(String),
     Card(Vec<Card>),
     Raise(u32),
+    Number(i32),
 }
 
 pub struct Pending(Option<GameState>);
@@ -520,5 +563,11 @@ pub enum IntReqType {
 pub enum IntReqValue {
     None,
     Message(String),
-    Duration(u64),
+    TimeOut(TimeOut),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TimeOut {
+    pub duration: std::time::Duration,
+    pub state_id: String,
 }
