@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::cmp::Ordering;
+use strum_macros::Display;
 use serde::{ Deserialize , Serialize};
 use tokio::sync::mpsc;
 use warp::ws::Message;
@@ -7,6 +10,8 @@ use strum_macros::EnumIter;
 use rand::prelude::*;
 use uuid::Uuid;
 
+const CARD_MAX_NUMBER: usize = 13;
+const COMB_COUNT: usize = 4;
 const BET_TIME : u64 = 15;
 const CARD_NUMBER : usize = 14;
 const DEFAULT_HP : u32 = 30;
@@ -158,6 +163,7 @@ impl Game {
             }
             GameState::River | GameState::Fold => {
                 self.state = GameState::ShowDown;
+                self.calculate_showdown();
             }
             GameState::ShowDown => {
                 self.state = GameState::Flop;
@@ -180,6 +186,7 @@ impl Game {
                 }
                 GameState::River | GameState::Fold => {
                     self.state = GameState::ShowDown;
+                    self.calculate_showdown();
                 }
                 GameState::ShowDown => {
                     self.state = GameState::Flop;
@@ -259,6 +266,8 @@ impl Game {
                         // halt their action after the delay.
                         self.state_extend = true;
 
+                        // TODO IMPORTANT
+                        // Should this code go to next_state function ?
                         let req_timeout =InternalRequest::new_json(
                             IntReqType::TimeOut, 
                             IntReqValue::TimeOut(TimeOut{duration: std::time::Duration::from_secs(BET_TIME), state_id: self.state_id.as_ref().unwrap().clone()})
@@ -296,6 +305,7 @@ impl Game {
                 user.current_action == PlayerAction::Fold ||
                     opp.current_action == PlayerAction::Fold {
                         eprintln!("PENDING!");
+                        self.end_bet();
                         pending = Pending(Some(self.state));
             }
         }
@@ -313,6 +323,32 @@ impl Game {
         // TODO Start a game.
     }
 
+    fn end_bet(&self) {
+
+        if let None = self.participant {
+            return;
+        }
+
+        let total_bet = self.get_total_bet();
+        self.creator.send_message(
+            &ServerResponse::new_json(
+                ResponseType::BetResult, 
+                ResponseValue::BetResult(BetResult{opponent_action: self.participant.as_ref().unwrap().current_action, total_bet})
+            ).expect("Failed to create server response")
+        );
+
+        self.participant.as_ref().unwrap().send_message(
+            &ServerResponse::new_json(
+                ResponseType::BetResult, 
+                ResponseValue::BetResult(BetResult{opponent_action: self.creator.current_action, total_bet})
+            ).expect("Failed to create server response")
+        );
+    }
+
+    fn get_total_bet(&self) -> u32 {
+        self.participant.as_ref().unwrap().stat.bet + self.creator.stat.bet
+    }
+
     fn clear_user_status(&mut self) {
         if let None =self.participant {
             eprintln!("Invalid work flow should call function clear_user_status when participant is not empty");
@@ -320,6 +356,149 @@ impl Game {
         }
         self.creator.current_action = PlayerAction::None;
         self.participant.as_mut().unwrap().current_action = PlayerAction::None;
+    }
+
+    fn calculate_showdown(&mut self) {
+        let user_iter = self.community.iter().chain(self.creator.stat.cards.iter());
+        let participant_iter = 
+            self.community.iter().chain(self.participant.as_ref().unwrap().stat.cards.iter());
+
+        let user_card_array = user_iter.cloned().collect::<Vec<Card>>();
+        let part_card_array = participant_iter.cloned().collect::<Vec<Card>>();
+
+        let ( user_comb , user_meta ) = CombinationBuilder::get_highest_combination(user_card_array);
+        let ( part_comb , part_meta ) = CombinationBuilder::get_highest_combination(part_card_array);
+
+        let mut comparison: Ordering = Ordering::Equal;
+
+        let cmp_result = (user_comb as u8).cmp(&(part_comb as u8));
+        match cmp_result {
+            // user wins
+            Ordering::Greater => {
+                comparison = Ordering::Greater;
+            }
+            // participant wins
+            Ordering::Less => {
+                comparison = Ordering::Less;
+            }
+            // draws or both is high number
+            Ordering::Equal => {
+                if let Some(number) = user_meta {
+                    let user_number = number.parse::<i32>().unwrap_or(0);
+                    let part_number = part_meta.unwrap_or("0".to_string()).parse::<i32>().unwrap_or(0);
+
+                    let meta_result = user_number.cmp(&part_number).reverse();
+                    match meta_result {
+                        // user wins
+                        Ordering::Greater => {
+                            comparison = Ordering::Greater;
+                        }
+                        // participant wins
+                        Ordering::Less => {
+                            comparison = Ordering::Less;
+                        }
+                        // draws or both is high number
+                        Ordering::Equal => {}
+                    }
+                }
+            }
+        }
+
+        // Cached participant user struct
+        let mut participant = self.participant.as_mut().unwrap();
+        // Do real logics
+        match comparison {
+            Ordering::Equal => {
+                let to_creator_response = 
+                    ServerResponse::new_json(
+                        ResponseType::RoundResult, 
+                        ResponseValue::RoundResult(RoundResult {
+                            win: None,
+                            comb: user_comb,
+                            opp_comb: part_comb,
+                            hp: self.creator.stat.hp,
+                            opp_hp: participant.stat.hp,
+                        })
+                    ).expect("Failed to create server reseponse");
+
+                let to_part_response = 
+                    ServerResponse::new_json(
+                        ResponseType::RoundResult, 
+                        ResponseValue::RoundResult(RoundResult {
+                            win: Some(false),
+                            comb: part_comb,
+                            opp_comb: user_comb,
+                            hp: participant.stat.hp,
+                            opp_hp: self.creator.stat.hp,
+                        })
+                    ).expect("Failed to create server reseponse");
+                self.creator.send_message(&to_creator_response);
+                participant.send_message(&to_part_response);
+            }
+            Ordering::Greater => {
+                // Calculate damage 
+                // Cache
+                let left_hp = participant.apply_damage(user_comb as u32);
+
+                let to_creator_response = 
+                    ServerResponse::new_json(
+                        ResponseType::RoundResult, 
+                        ResponseValue::RoundResult(RoundResult {
+                            win: Some(true),
+                            comb: user_comb,
+                            opp_comb: part_comb,
+                            hp: self.creator.stat.hp,
+                            opp_hp: left_hp,
+                        })
+                    ).expect("Failed to create server reseponse");
+
+                let to_part_response = 
+                    ServerResponse::new_json(
+                        ResponseType::RoundResult, 
+                        ResponseValue::RoundResult(RoundResult {
+                            win: Some(false),
+                            comb: part_comb,
+                            opp_comb: user_comb,
+                            hp: left_hp,
+                            opp_hp: self.creator.stat.hp,
+                        })
+                    ).expect("Failed to create server reseponse");
+                self.creator.send_message(&to_creator_response);
+                participant.send_message(&to_part_response);
+            }
+            Ordering::Less => {
+                // Calculate damage 
+                // Cache
+                let left_hp = self.creator.apply_damage(user_comb as u32);
+
+                let to_creator_response = 
+                    ServerResponse::new_json(
+                        ResponseType::RoundResult, 
+                        ResponseValue::RoundResult(RoundResult {
+                            win: Some(false),
+                            comb: user_comb,
+                            opp_comb: part_comb,
+                            hp: left_hp,
+                            opp_hp: participant.stat.hp,
+                        })
+                    ).expect("Failed to create server reseponse");
+
+                let to_part_response = 
+                    ServerResponse::new_json(
+                        ResponseType::RoundResult, 
+                        ResponseValue::RoundResult(RoundResult {
+                            win: Some(true),
+                            comb: part_comb,
+                            opp_comb: user_comb,
+                            hp: participant.stat.hp,
+                            opp_hp: left_hp,
+                        })
+                    ).expect("Failed to create server reseponse");
+
+                self.creator.send_message(&to_creator_response);
+                participant.send_message(&to_part_response);
+            }
+        }
     }
 }
 
@@ -343,37 +522,29 @@ impl User {
         }
     }
 
-    // TODO
-    pub fn get_card_combination(&self) -> CardCombination {
-        CardCombination::HighCard
-    }
-
-    pub fn add_card(&mut self, card: Card) {
-        self.stat.cards.push(card);
-    }
-
     // Bet should be incremental
     pub fn bet(&mut self, amount: u32) {
-        if let Some(value) = self.stat.bet {
-            self.stat.bet.replace(value+amount);
-        } else {
-            self.stat.bet.replace(amount);
-        }
+        self.stat.bet += amount;
     }
 
     pub fn fold(&mut self) {
-        self.stat.bet = None;
+        self.stat.bet = 0;
     }
 
     pub fn send_message(&self, msg :&str) {
         self.sender.send(Ok(Message::text(msg)))
             .expect("Failed to send message");
     }
+
+    pub fn apply_damage(&mut self, damage: u32) -> u32{
+        self.stat.hp -= damage;
+        return self.stat.hp;
+    }
 }
 
 pub struct PlayerStat {
     pub hp: u32,
-    pub bet : Option<u32>,
+    pub bet : u32,
     pub cards: Vec<Card>,
 }
 
@@ -381,7 +552,7 @@ impl PlayerStat {
     pub fn new() -> Self {
         Self {  
             hp: DEFAULT_HP,
-            bet: None,
+            bet: 0,
             cards: vec![],
         }
     }
@@ -395,7 +566,7 @@ impl CardPool {
     pub fn new() -> Self {
         let mut cards: Vec<Card> = vec![];
         for card_type in CardType::iter() {
-            for number in 0..CARD_NUMBER {
+            for number in 1..CARD_NUMBER {
                 cards.push(Card{card_type, number : number as u8})
             }
         }
@@ -410,7 +581,7 @@ impl CardPool {
         // TODO ::: 
         // This is not necessarily a great optimization since creation of thread local
         // generator is not lightoperation. 
-        let index = rand::thread_rng().gen_range(0..self.cards.len());
+        let index = rand::thread_rng().gen_range(1..self.cards.len());
 
         Some(self.cards.remove(index))
     }
@@ -424,7 +595,7 @@ impl CardPool {
         // This is not necessarily a great optimization since creation of thread local
         // generator is not lightoperation. 
         for _ in 0..count {
-            let index = rand::thread_rng().gen_range(0..self.cards.len());
+            let index = rand::thread_rng().gen_range(1..self.cards.len());
             cards.push( self.cards.remove(index) );
         }
 
@@ -432,13 +603,34 @@ impl CardPool {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
+#[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, PartialOrd, Eq)]
 pub struct Card {
-    card_type: CardType,
-    number: u8,
+    pub card_type: CardType,
+    pub number: u8,
 }
 
-#[derive(Debug ,Clone, Copy, EnumIter, Serialize, Deserialize)]
+impl Card {
+    pub fn new(card_type: CardType, number: u8) -> Self {
+        Self {  
+            card_type, 
+            number,
+        }
+    }
+}
+
+impl Ord for Card {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let type_cmp = self.card_type.to_string().cmp(&other.card_type.to_string());
+        //if let Ordering::Equal = type_cmp {
+            //self.number.cmp(&other.number)
+        //} else {
+            //type_cmp
+        //}
+        type_cmp
+    }
+}
+
+#[derive(Debug ,Clone, Copy, EnumIter, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Display, Hash)]
 pub enum CardType {
     Diamond,
     Spade,
@@ -446,19 +638,20 @@ pub enum CardType {
     Clover,
 }
 
+#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 pub enum CardCombination {
-    HighCard,
-    Pair,
-    TwoPair,
-    ThreeOfaKind,
-    FullHouse,
-    Straight,
-    Flush,
-    Sflush,
-    Rflush,
+    HighCard = 0,
+    Pair = 1,
+    TwoPair = 2,
+    ThreeOfaKind = 3,
+    FullHouse = 4,
+    Straight = 5 ,
+    Flush = 6,
+    Sflush = 7,
+    Rflush = 8,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Copy, Clone)]
 pub enum PlayerAction {
     None,
     Message,
@@ -493,6 +686,8 @@ pub enum ResponseType {
     Message,
     Raise,
     Delay,
+    BetResult,
+    RoundResult,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -513,6 +708,8 @@ impl ServerResponse{
 #[derive(Serialize, Deserialize)]
 pub enum ResponseValue {
     State(( GameState , String)),
+    BetResult(BetResult),
+    RoundResult(RoundResult),
     Message(String),
     Card(Vec<Card>),
     Raise(u32),
@@ -570,4 +767,158 @@ pub enum IntReqValue {
 pub struct TimeOut {
     pub duration: std::time::Duration,
     pub state_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct BetResult {
+    pub opponent_action: PlayerAction,
+    pub total_bet : u32,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RoundResult {
+    pub win: Option<bool>,
+    pub comb: CardCombination,
+    pub opp_comb: CardCombination,
+    pub hp : u32,
+    pub opp_hp : u32,
+}
+
+pub struct CombinationBuilder;
+
+impl CombinationBuilder {
+    pub fn get_highest_combination(mut cards : Vec<Card>) -> (CardCombination, Option<String>) {
+        if cards.len() <= 1 {
+            panic!("Invalid card vector given to function : get_highest_combination");
+        }
+
+        cards.sort_by(|a,b| a.number.cmp(&b.number));
+        
+        let mut type_map = std::collections::HashMap::new();
+        type_map.insert(CardType::Heart, 0);
+        type_map.insert(CardType::Clover, 0);
+        type_map.insert(CardType::Spade, 0);
+        type_map.insert(CardType::Diamond, 0);
+
+        let mut pair = 0;
+        let mut three = 0;
+        let mut max_straight_count = 1; // default is 1
+        let mut current_straight_count = 1; // default is 1
+        let mut straight_min_index: Vec<usize> = vec![];
+
+        // Add first 
+        *(type_map.get_mut(&cards[0].card_type).unwrap()) += 1;
+
+        for i in 1..cards.len() {
+            // Add suit into hashmap
+            *(type_map.get_mut(&cards[i].card_type).unwrap()) += 1;
+
+            // if current number is Increasing
+            if cards[i].number - 1 == cards[i-1].number {
+                // sustain straightness
+                current_straight_count += 1;
+
+                if current_straight_count >= COMB_COUNT {
+                    straight_min_index.push(i - (COMB_COUNT - 1));
+                }
+
+                // Update max_straight_count
+                if max_straight_count < current_straight_count {
+                    max_straight_count = current_straight_count;
+                }
+            } 
+            // if current number is the same number as prior element
+            else if cards[i].number == cards[i-1].number{
+                if i >= 2 && cards[i].number == cards[i-2].number {
+
+                    three += 1;
+
+                    // NOTE!
+                    // This is because currently pair is added before threeofkind is detected.
+                    // e.g at following order...
+                    // [0]. J [1]. J [2]. J
+                    // in 1st index it will add pair and also add pair at 2nd index
+                    // while adding three by 1 in 2nd index.
+                    // this is not desirable thus pair should be decreased by 1
+                    // to make three and pair distinctive.
+                    pair -= 1;
+                } else {
+                    pair += 1;
+                }
+            } 
+            // None of the above conditions are met
+            else {
+                // reset
+                current_straight_count = 1;
+            }
+        }
+
+        // At least straight
+        if max_straight_count >= COMB_COUNT {
+            // TODO Change this 
+            let mut royal_straight_flush = false;
+            let mut straight_flush = false;
+            let mut straight = false;
+
+            for index in straight_min_index {
+                let mut flush_straight = true;
+                // Check if royal straight flush or straight flush holds
+                // set default suit 
+                let suit : CardType = cards[index].card_type;
+                for i in index + 1..index + COMB_COUNT {
+                    if suit != cards[i].card_type {
+                        flush_straight = false;
+                        break;
+                    }
+                }
+
+                if flush_straight {
+                    if cards[index].number as usize == CARD_MAX_NUMBER - COMB_COUNT + 1 {
+                        // This is royal flush
+                        royal_straight_flush = true;
+                    } else {
+                        // Straight flush
+                        straight_flush = true;
+                    }
+                } 
+                // NO flush 
+                else {
+                    straight = true;
+                }
+            }
+
+            // Return combinations
+            if royal_straight_flush { return (CardCombination::Rflush, None); }
+            else if straight_flush { return (CardCombination::Sflush, None); }
+            else if straight { return (CardCombination::Straight, None); }
+
+        } 
+        // No straight
+        else {
+            // Check flush
+            for (_, value) in type_map.iter() {
+                if *value >= COMB_COUNT {
+                    return (CardCombination::Flush, None);
+                }
+            }
+        }
+
+        if three >= 1 {
+            if pair >= 1 {
+                return (CardCombination::FullHouse, None);
+            } else {
+                return (CardCombination::ThreeOfaKind, None);
+            }
+        } else {
+            if pair >= 2 {
+                return (CardCombination::TwoPair, None);
+            } else if pair >= 1 {
+                return (CardCombination::Pair, None);
+            }
+        }
+
+        // This is because array is sorted increasing order by number.
+        // Thust last card has highest number
+        (CardCombination::HighCard, Some(cards[cards.len()-1].number.to_string()))
+    }
 }

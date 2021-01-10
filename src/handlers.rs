@@ -86,17 +86,21 @@ pub async fn join(ws: WebSocket, room_id: String, conn: Connections) {
     // Create user id and insert into connetion hashmap
     let user_id = Uuid::new_v4().to_simple().to_string();
 
-    let msg = serde_json::to_string(&ServerResponse{
-            response_type: ResponseType::Message, 
-            value: ResponseValue::Message(format!("Successfully joined a room : {}", room_id).to_string())})
-        .expect("Failed to create json object");
-
-    server_tx.send(Ok(Message::text(msg))).expect("Failed to send message");
-
-    // TODO :: Change this opertion from insert into modification.
-    //conn.lock().unwrap().insert(user_id.clone(), Connection::new(user_id.clone(), room_id, server_tx));
+    // SPawn a thread for forwarding stream from server reciever to user transmitter.
+    tokio::task::spawn( server_rx.forward(user_tx).map(|result| {
+        if let Err(e) = result {
+            eprintln!("websocket error: {:?}", e);
+        }
+    }));
 
     if let Some(connection) = conn.lock().unwrap().get_mut(&room_id) {
+
+        let msg = serde_json::to_string(&ServerResponse{
+            response_type: ResponseType::Message, 
+            value: ResponseValue::Message(format!("Successfully joined a room : {}", room_id).to_string())})
+            .expect("Failed to create json object");
+
+        server_tx.send(Ok(Message::text(msg))).expect("Failed to send message");
         // Set connection into room
         connection.game.join_game(user_id.clone(), server_tx);
         // Initialize game.
@@ -105,14 +109,17 @@ pub async fn join(ws: WebSocket, room_id: String, conn: Connections) {
         connection.game.init_game();
     } else {
         // Reject
+        let msg = serde_json::to_string(&ServerResponse{
+            response_type: ResponseType::Message, 
+            value: ResponseValue::Message("Failed to join room".to_string())})
+            .expect("Failed to create json object");
+
+        server_tx.send(Ok(Message::text(msg))).expect("Failed to send message");
+        return;
     }
 
-    // SPawn a thread for forwarding stream from server reciever to user transmitter.
-    tokio::task::spawn( server_rx.forward(user_tx).map(|result| {
-        if let Err(e) = result {
-            eprintln!("websocket error: {:?}", e);
-        }
-    }));
+    // TODO :: Change this opertion from insert into modification.
+    //conn.lock().unwrap().insert(user_id.clone(), Connection::new(user_id.clone(), room_id, server_tx));
 
 
     // From user client to server receiver.
