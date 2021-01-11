@@ -60,7 +60,7 @@ pub async fn create(ws: WebSocket, conn: Connections) {
                         break;
                     }
                 };
-                internal_request(&room_id_clone, msg, &conn_clone).await;
+                internal_request_handler(&room_id_clone, msg, &conn_clone).await;
             }
         }
     );
@@ -73,10 +73,10 @@ pub async fn create(ws: WebSocket, conn: Connections) {
                 break;
             }
         };
-        user_request(&room_id, &user_id, msg, &conn).await;
+        user_request_handler(&room_id, &user_id, msg, &conn).await;
     }
 
-    user_disconnected(&user_id, &conn).await;
+    user_disconnected_handler(&user_id, &conn).await;
 }
 
 pub async fn join(ws: WebSocket, room_id: String, conn: Connections) {
@@ -131,14 +131,14 @@ pub async fn join(ws: WebSocket, room_id: String, conn: Connections) {
                 break;
             }
         };
-        user_request(&room_id, &user_id, msg, &conn).await;
+        user_request_handler(&room_id, &user_id, msg, &conn).await;
         //user_message(&room_id, &user_id, msg, &conn).await;
     }
 
-    user_disconnected(&room_id, &conn).await;
+    user_disconnected_handler(&room_id, &conn).await;
 }
 
-pub async fn internal_request(room_id: &str, msg: Message, conn: &Connections) {
+pub async fn internal_request_handler(room_id: &str, msg: Message, conn: &Connections) {
     // Skip any non-Text messages...
     let msg = if let Ok(s) = msg.to_str() {
         s
@@ -178,11 +178,7 @@ pub async fn internal_request(room_id: &str, msg: Message, conn: &Connections) {
                     let mut hash = conn_clone.lock().unwrap();
                     if let Some(connection) = hash.get_mut(&room_id_clone) {
                         // If state has been extended ignore request and drop.
-                        if connection.game.state_extend {
-                            connection.game.state_extend = false;
-                        } else {
-                            connection.game.next_state(&time_out.state_id);
-                        }
+                        connection.game.next_state(&time_out.state_id);
                     } else {
                         eprintln!("Skipped request because connection lost");
                     }
@@ -195,7 +191,7 @@ pub async fn internal_request(room_id: &str, msg: Message, conn: &Connections) {
     }
 }
 
-pub async fn user_request(room_id: &str, user_id: &str, msg: Message, conn: &Connections) {
+pub async fn user_request_handler(room_id: &str, user_id: &str, msg: Message, conn: &Connections) {
     // Skip any non-Text messages...
     let msg = if let Ok(s) = msg.to_str() {
         s
@@ -224,7 +220,7 @@ pub async fn user_request(room_id: &str, user_id: &str, msg: Message, conn: &Con
     }
 }
 
-pub async fn user_disconnected(room_id: &str, conn: &Connections) {
+pub async fn user_disconnected_handler(room_id: &str, conn: &Connections) {
     eprintln!("User disconnected");
 
     // Stream closed up, so remove from the user list

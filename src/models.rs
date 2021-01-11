@@ -13,6 +13,7 @@ use uuid::Uuid;
 const CARD_MAX_NUMBER: usize = 13;
 const COMB_COUNT: usize = 4;
 const BET_TIME : u64 = 15;
+const SHOWDOWN_TIME: u64 = 8;
 const CARD_NUMBER : usize = 14;
 const DEFAULT_HP : u32 = 30;
 
@@ -91,6 +92,28 @@ impl Game {
             eprintln!("Tried to init a game with no participant.");
             return;
         }
+        self.init_cards_and_send();
+        self.set_state_id_and_send();
+
+        // Set timeout by sending request through internal channel
+        let req_timeout =InternalRequest::new_json(
+            IntReqType::TimeOut, 
+            IntReqValue::TimeOut(TimeOut{duration: std::time::Duration::from_secs(BET_TIME), state_id: self.state_id.as_ref().unwrap().clone()})
+        ).expect("Failed to create internal request");
+        let result = self.internal_sender.send(Ok(Message::text(req_timeout)));
+        match result {
+            Ok(()) => {
+                eprintln!("Successfully sent internal request");
+            }
+            Err(_) => {
+                eprintln!("Couldn't send internal request");
+            }
+        }
+    }
+
+    pub fn init_cards_and_send(&mut self) {
+        // Refresh card_pool
+        self.card_pool = CardPool::new();
 
         // NOTE
         // This can theoritically fail 
@@ -118,23 +141,6 @@ impl Game {
             ResponseValue::Card(self.participant.as_ref().unwrap().stat.cards.clone())
         ).expect("Failed to create server response");
         self.participant.as_ref().unwrap().send_message(&res_part);
-
-        self.set_state_id_and_send();
-
-        // Set timeout by sending request through internal channel
-        let req_timeout =InternalRequest::new_json(
-            IntReqType::TimeOut, 
-            IntReqValue::TimeOut(TimeOut{duration: std::time::Duration::from_secs(BET_TIME), state_id: self.state_id.as_ref().unwrap().clone()})
-        ).expect("Failed to create internal request");
-        let result = self.internal_sender.send(Ok(Message::text(req_timeout)));
-        match result {
-            Ok(()) => {
-                eprintln!("Successfully sent internal request");
-            }
-            Err(_) => {
-                eprintln!("Couldn't send internal request");
-            }
-        }
     }
 
     pub fn broadcast_message(&self, msg: &str) {
@@ -154,12 +160,26 @@ impl Game {
         if self.state_id.as_ref().unwrap() != state_id {
             return;
         }
-        match self.state {
+        self.change_state(self.state);
+    }
+
+    pub fn pending_next_state(&mut self, pending: Pending) {
+        if let Pending(Some(state)) = pending {
+            eprintln!("It's pending, step to next state");
+            self.change_state(state);
+        }
+    }
+
+    fn change_state(&mut self, current_state: GameState) {
+        let mut new_card :Option<Card> = None;
+        match current_state {
             GameState::Flop => {
                 self.state = GameState::Turn;
+                new_card.replace(self.add_community());
             }
             GameState::Turn => {
                 self.state = GameState::River;
+                new_card.replace(self.add_community());
             }
             GameState::River | GameState::Fold => {
                 self.state = GameState::ShowDown;
@@ -170,34 +190,32 @@ impl Game {
             }
         }
 
-        self.clear_user_status();
+        // TODO 
+        // Do something necessary for initialization
+        self.clear_user_action();
         self.set_state_id_and_send();
-    }
 
-    pub fn pending_next_state(&mut self, pending: Pending) {
-        if let Pending(Some(state)) = pending {
-            eprintln!("It's pending, step to next state");
-            match state {
-                GameState::Flop => {
-                    self.state = GameState::Turn;
-                }
-                GameState::Turn => {
-                    self.state = GameState::River;
-                }
-                GameState::River | GameState::Fold => {
-                    self.state = GameState::ShowDown;
-                    self.calculate_showdown();
-                }
-                GameState::ShowDown => {
-                    self.state = GameState::Flop;
-                }
-            }
-
-            // TODO 
-            // Do something necessary for initialization
-            self.clear_user_status();
-            self.set_state_id_and_send();
+        if let Some(card) = new_card {
+            let res = ServerResponse::new_json(ResponseType::Community, ResponseValue::Card(vec![card])).expect("Failed to create server response");
+            self.creator.send_message(&res);
+            self.participant.as_ref().unwrap().send_message(&res);
         }
+
+        if let GameState::ShowDown = self.state {
+            // Send Timeout request
+            let req = InternalRequest::new_json(
+                IntReqType::TimeOut, 
+                IntReqValue::TimeOut(TimeOut {
+                    duration: std::time::Duration::from_secs(SHOWDOWN_TIME), 
+                    state_id: self.state_id.clone().unwrap()
+                })
+            ).expect("Failed to create internal request");
+            self.internal_sender.send(Ok(Message::text(req)))
+                .expect("Failed to send internal request");
+            } else if let GameState::Flop = self.state {
+                self.clear_user_bet();
+                self.init_cards_and_send();
+            }
     }
 
     pub fn receive_player_action(&mut self, uid: &str, req: UserRequest) -> Pending {
@@ -297,16 +315,33 @@ impl Game {
                 user.current_action = req.action;
             }
 
+
+            let mut bet_end = false;
             // TODO :: Check if server can change the state 
             // thus make Pending current state.
             // if all players' have bet.
             // change the state.
-            if user.current_action == opp.current_action ||
-                user.current_action == PlayerAction::Fold ||
-                    opp.current_action == PlayerAction::Fold {
-                        eprintln!("PENDING!");
-                        self.end_bet();
-                        pending = Pending(Some(self.state));
+            // Currently it reverts  bet by hard code if it gets non limit hold'em
+            // it get's different and should be re-implemented.
+            if user.current_action == opp.current_action {
+                bet_end = true;
+                pending = Pending(Some(self.state));
+            } else if user.current_action == PlayerAction::Fold {
+                bet_end = true;
+                if let PlayerAction::Raise = opp.current_action {
+                    opp.stat.bet -= 1;
+                }
+                pending = Pending(Some(GameState::Fold));
+            } else if opp.current_action == PlayerAction::Fold {
+                bet_end = true;
+                if let PlayerAction::Raise = user.current_action {
+                    user.stat.bet -= 1;
+                }
+                pending = Pending(Some(GameState::Fold));
+            }
+
+            if bet_end {
+                self.end_bet();
             }
         }
 
@@ -345,19 +380,42 @@ impl Game {
         );
     }
 
+    // Prefere this method rather than manually adding two bets
     fn get_total_bet(&self) -> u32 {
-        self.participant.as_ref().unwrap().stat.bet + self.creator.stat.bet
+        // NOTE Hard coded initial bet which is 2 in this case.
+        // Due to mutural refernce rule total_bet should be boxed into variable
+        self.participant.as_ref().unwrap().stat.bet + self.creator.stat.bet + 2
     }
 
-    fn clear_user_status(&mut self) {
+    fn add_community(&mut self) -> Card {
+        if let Some(card) = self.card_pool.poll_card() {
+            self.community.push(card.clone());
+            card
+        } else {
+            panic!("This should not happen. This error occured because every possible card in card pools has been polled");
+        }
+    }
+
+    fn clear_user_bet(&mut self) {
         if let None =self.participant {
-            eprintln!("Invalid work flow should call function clear_user_status when participant is not empty");
+            eprintln!("Invalid work flow should call function clear_user_bet when participant is not empty");
+            return;
+        }
+
+        self.creator.stat.bet = 0;
+        self.participant.as_mut().unwrap().stat.bet = 0;
+    }
+    fn clear_user_action(&mut self) {
+        if let None =self.participant {
+            eprintln!("Invalid work flow should call function clear_user_action when participant is not empty");
             return;
         }
         self.creator.current_action = PlayerAction::None;
         self.participant.as_mut().unwrap().current_action = PlayerAction::None;
     }
 
+    // TODO Should check this code
+    // lots of copy pasta might be problematic
     fn calculate_showdown(&mut self) {
         let user_iter = self.community.iter().chain(self.creator.stat.cards.iter());
         let participant_iter = 
@@ -405,7 +463,8 @@ impl Game {
         }
 
         // Cached participant user struct
-        let mut participant = self.participant.as_mut().unwrap();
+        // TODO
+        // Damn.. I forgot this should be refactored
         // Do real logics
         match comparison {
             Ordering::Equal => {
@@ -417,7 +476,7 @@ impl Game {
                             comb: user_comb,
                             opp_comb: part_comb,
                             hp: self.creator.stat.hp,
-                            opp_hp: participant.stat.hp,
+                            opp_hp: self.participant.as_ref().unwrap().stat.hp,
                         })
                     ).expect("Failed to create server reseponse");
 
@@ -425,21 +484,21 @@ impl Game {
                     ServerResponse::new_json(
                         ResponseType::RoundResult, 
                         ResponseValue::RoundResult(RoundResult {
-                            win: Some(false),
+                            win: None,
                             comb: part_comb,
                             opp_comb: user_comb,
-                            hp: participant.stat.hp,
+                            hp: self.participant.as_ref().unwrap().stat.hp,
                             opp_hp: self.creator.stat.hp,
                         })
                     ).expect("Failed to create server reseponse");
                 self.creator.send_message(&to_creator_response);
-                participant.send_message(&to_part_response);
+                self.participant.as_ref().unwrap().send_message(&to_part_response);
             }
             Ordering::Greater => {
                 // Calculate damage 
                 // Cache
-                let left_hp = participant.apply_damage(user_comb as u32);
-
+                let total_bet  = self.get_total_bet();
+                let left_hp = self.participant.as_mut().unwrap().apply_damage(total_bet);
                 let to_creator_response = 
                     ServerResponse::new_json(
                         ResponseType::RoundResult, 
@@ -464,12 +523,12 @@ impl Game {
                         })
                     ).expect("Failed to create server reseponse");
                 self.creator.send_message(&to_creator_response);
-                participant.send_message(&to_part_response);
+                self.participant.as_ref().unwrap().send_message(&to_part_response);
             }
             Ordering::Less => {
                 // Calculate damage 
                 // Cache
-                let left_hp = self.creator.apply_damage(user_comb as u32);
+                let left_hp = self.creator.apply_damage(self.get_total_bet());
 
                 let to_creator_response = 
                     ServerResponse::new_json(
@@ -479,7 +538,7 @@ impl Game {
                             comb: user_comb,
                             opp_comb: part_comb,
                             hp: left_hp,
-                            opp_hp: participant.stat.hp,
+                            opp_hp: self.participant.as_ref().unwrap().stat.hp,
                         })
                     ).expect("Failed to create server reseponse");
 
@@ -490,13 +549,13 @@ impl Game {
                             win: Some(true),
                             comb: part_comb,
                             opp_comb: user_comb,
-                            hp: participant.stat.hp,
+                            hp: self.participant.as_ref().unwrap().stat.hp,
                             opp_hp: left_hp,
                         })
                     ).expect("Failed to create server reseponse");
 
                 self.creator.send_message(&to_creator_response);
-                participant.send_message(&to_part_response);
+                self.participant.as_ref().unwrap().send_message(&to_part_response);
             }
         }
     }
