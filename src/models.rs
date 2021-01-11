@@ -13,10 +13,10 @@ use uuid::Uuid;
 
 const CARD_MAX_NUMBER: usize = 13;
 const COMB_COUNT: usize = 5;
-const BET_TIME : u64 = 15;
+const BET_TIME : u64 = 30;
 const SHOWDOWN_TIME: u64 = 8;
 const CARD_NUMBER : usize = 14;
-const DEFAULT_HP : u32 = 30;
+const DEFAULT_HP : u32 = 20;
 
 // TODO :: Make submodels
 
@@ -108,6 +108,7 @@ impl Game {
             eprintln!("Tried to init a game with no participant.");
             return;
         }
+        self.send_env_variables();
         self.init_cards_and_send();
         self.set_state_id_and_send();
 
@@ -127,7 +128,27 @@ impl Game {
         }
     }
 
-    pub fn init_cards_and_send(&mut self) {
+    fn send_env_variables(&self) {
+        if let None = self.participant {
+            eprintln!("Invalid operation participant is empty");
+            return;
+        }
+
+        let res = ServerResponse::new_json(
+            ResponseType::Env, 
+            ResponseValue::Env(
+                EnvVar{
+                    hp: DEFAULT_HP,
+                    bet_time: BET_TIME,
+                    result_time: SHOWDOWN_TIME,
+                }, 
+            )
+        ).expect("Failed to create server response");
+        self.creator.send_message(&res);
+        self.participant.as_ref().unwrap().send_message(&res);
+    }
+
+    fn init_cards_and_send(&mut self) {
         // Refresh card_pool
         self.card_pool = CardPool::new();
 
@@ -388,8 +409,6 @@ impl Game {
         sender: mpsc::UnboundedSender<Result<Message, warp::Error>>
     ) {
         self.participant.replace(User::new(id, sender));
-
-        // TODO Start a game.
     }
 
     fn end_bet(&self) {
@@ -437,7 +456,9 @@ impl Game {
         }
 
         self.creator.stat.bet = 0;
+        self.creator.stat.fold = false;
         self.participant.as_mut().unwrap().stat.bet = 0;
+        self.participant.as_mut().unwrap().stat.fold = false;
     }
     fn clear_user_action(&mut self) {
         if let None =self.participant {
@@ -451,6 +472,16 @@ impl Game {
     // TODO Should check this code
     // lots of copy pasta might be problematic
     fn calculate_showdown(&mut self) {
+
+        let mut cmp_result : Ordering = Ordering::Equal;
+        let mut comparison: Ordering = Ordering::Equal;
+
+        if self.creator.stat.fold {
+            cmp_result = Ordering::Less;
+        } else if self.participant.as_ref().unwrap().stat.fold {
+            cmp_result = Ordering::Greater;
+        }
+
         let user_iter = self.community.iter().chain(self.creator.stat.cards.iter());
         let participant_iter = 
             self.community.iter().chain(self.participant.as_ref().unwrap().stat.cards.iter());
@@ -461,9 +492,11 @@ impl Game {
         let ( user_comb , user_meta ) = CombinationBuilder::get_highest_combination(user_card_array);
         let ( part_comb , part_meta ) = CombinationBuilder::get_highest_combination(part_card_array);
 
-        let mut comparison: Ordering = Ordering::Equal;
+        // If no fold is found then calculate normally.
+        if let Ordering::Equal = cmp_result {
+            cmp_result = (user_comb as u8).cmp(&(part_comb as u8));
+        }
 
-        let cmp_result = (user_comb as u8).cmp(&(part_comb as u8));
         match cmp_result {
             // user wins
             Ordering::Greater => {
@@ -622,6 +655,7 @@ impl User {
 
     pub fn fold(&mut self) {
         self.stat.bet = 0;
+        self.stat.fold = true;
     }
 
     pub fn send_message(&self, msg :&str) {
@@ -636,6 +670,7 @@ impl User {
 }
 
 pub struct PlayerStat {
+    pub fold: bool,
     pub hp: u32,
     pub bet : u32,
     pub cards: Vec<Card>,
@@ -644,6 +679,7 @@ pub struct PlayerStat {
 impl PlayerStat {
     pub fn new() -> Self {
         Self {  
+            fold: false,
             hp: DEFAULT_HP,
             bet: 0,
             cards: vec![],
@@ -776,6 +812,7 @@ impl UserRequest{
 
 #[derive(Serialize, Deserialize)]
 pub enum ResponseType {
+    Env,
     State,
     Community,
     Hand,
@@ -803,6 +840,7 @@ impl ServerResponse{
 
 #[derive(Serialize, Deserialize)]
 pub enum ResponseValue {
+    Env(EnvVar),
     State(( GameState , String)),
     BetResult(BetResult),
     RoundResult(RoundResult),
@@ -813,6 +851,13 @@ pub enum ResponseValue {
 }
 
 pub struct Pending(Option<GameState>);
+
+#[derive(Serialize, Deserialize)]
+pub struct EnvVar {
+    hp: u32,
+    bet_time: u64,
+    result_time: u64,
+}
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub enum GameState {
