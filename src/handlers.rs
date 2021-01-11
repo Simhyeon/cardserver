@@ -178,6 +178,7 @@ pub async fn internal_request_handler(room_id: &str, msg: Message, conn: &Connec
                     let mut hash = conn_clone.lock().unwrap();
                     if let Some(connection) = hash.get_mut(&room_id_clone) {
                         // If state has been extended ignore request and drop.
+                        eprintln!("Timeout");
                         connection.game.next_state(&time_out.state_id);
                     } else {
                         eprintln!("Skipped request because connection lost");
@@ -208,8 +209,8 @@ pub async fn user_request_handler(room_id: &str, user_id: &str, msg: Message, co
        return; 
     }
 
-    eprintln!("Received user request");
-    eprintln!("{:?}", req);
+    //eprintln!("Received user request");
+    //eprintln!("{:?}", req);
     let mut hash = conn.lock().unwrap();
     if let Some(connection) = hash.get_mut(room_id) {
         // New message from this user, send it to everyone else (except same uid)...
