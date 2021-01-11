@@ -7,11 +7,12 @@ use tokio::sync::mpsc;
 use warp::ws::Message;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
+use rand::distributions::{Distribution, Uniform};
 use rand::prelude::*;
 use uuid::Uuid;
 
 const CARD_MAX_NUMBER: usize = 13;
-const COMB_COUNT: usize = 4;
+const COMB_COUNT: usize = 5;
 const BET_TIME : u64 = 15;
 const SHOWDOWN_TIME: u64 = 8;
 const CARD_NUMBER : usize = 14;
@@ -85,6 +86,21 @@ impl Game {
         ).expect("Failed to create resonse");
         self.creator.send_message(&res_state);
         self.participant.as_ref().unwrap().send_message(&res_state);
+
+        // Create Timeout
+        let req_timeout =InternalRequest::new_json(
+            IntReqType::TimeOut, 
+            IntReqValue::TimeOut(TimeOut{duration: std::time::Duration::from_secs(BET_TIME), state_id: self.state_id.as_ref().unwrap().clone()})
+        ).expect("Failed to create internal request");
+        let result = self.internal_sender.send(Ok(Message::text(req_timeout)));
+        match result {
+            Ok(()) => {
+                eprintln!("Successfully sent internal request");
+            }
+            Err(_) => {
+                eprintln!("Couldn't send internal request");
+            }
+        }
     }
 
     pub fn init_game(&mut self) {
@@ -158,9 +174,25 @@ impl Game {
         // situations. Then error handing should be properly 
         // implemented.
         if self.state_id.as_ref().unwrap() != state_id {
+            eprintln!("State id not equal");
             return;
         }
+        eprintln!("It's pending, step to next state");
+        self.no_response_check();
         self.change_state(self.state);
+    }
+
+    fn no_response_check(&mut self) {
+        let user = &mut self.creator;
+        let opp = self.participant.as_mut().unwrap();
+
+        if let PlayerAction::None = user.current_action {
+            user.current_action = PlayerAction::Check;
+        }
+
+        if let PlayerAction::None = opp.current_action {
+            opp.current_action = PlayerAction::Check;
+        }
     }
 
     pub fn pending_next_state(&mut self, pending: Pending) {
@@ -171,6 +203,7 @@ impl Game {
     }
 
     fn change_state(&mut self, current_state: GameState) {
+        eprintln!("Change state");
         let mut new_card :Option<Card> = None;
         match current_state {
             GameState::Flop => {
@@ -182,6 +215,7 @@ impl Game {
                 new_card.replace(self.add_community());
             }
             GameState::River | GameState::Fold => {
+                eprintln!("SHOWDOWN!");
                 self.state = GameState::ShowDown;
                 self.calculate_showdown();
             }
@@ -208,14 +242,13 @@ impl Game {
                 IntReqValue::TimeOut(TimeOut {
                     duration: std::time::Duration::from_secs(SHOWDOWN_TIME), 
                     state_id: self.state_id.clone().unwrap()
-                })
-            ).expect("Failed to create internal request");
+                })).expect("Failed to create internal request");
             self.internal_sender.send(Ok(Message::text(req)))
                 .expect("Failed to send internal request");
-            } else if let GameState::Flop = self.state {
-                self.clear_user_bet();
-                self.init_cards_and_send();
-            }
+        } else if let GameState::Flop = self.state {
+            self.clear_user_bet();
+            self.init_cards_and_send();
+        }
     }
 
     pub fn receive_player_action(&mut self, uid: &str, req: UserRequest) -> Pending {
@@ -251,6 +284,7 @@ impl Game {
         match req.action {
             PlayerAction::Fold => {
                 user.fold();
+                opp.current_action = PlayerAction::Check;
             }
             PlayerAction::Message => {
                 if uid == user.id {
@@ -650,11 +684,14 @@ impl CardPool {
 
         let mut cards = vec![];
 
+        let mut rng = rand::thread_rng();
         // TODO ::: 
         // This is not necessarily a great optimization since creation of thread local
         // generator is not lightoperation. 
         for _ in 0..count {
-            let index = rand::thread_rng().gen_range(1..self.cards.len());
+            let between = Uniform::from(0..self.cards.len());
+            let index = between.sample(&mut rng);
+            //let index = rand::thread_rng().gen_range(1..self.cards.len());
             cards.push( self.cards.remove(index) );
         }
 
