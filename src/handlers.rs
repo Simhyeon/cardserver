@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use warp::{Filter, Reply};
-use futures::{FutureExt, StreamExt};
+use futures::{FutureExt, StreamExt, SinkExt};
 use warp::ws::{Message, WebSocket};
 
 use crate::models::{Connection, UserRequest, PlayerAction, ServerResponse, ResponseType, ResponseValue, InternalRequest, IntReqType, IntReqValue};
@@ -37,7 +37,6 @@ pub async fn create(ws: WebSocket, conn: Connections) {
     server_tx.send(Ok(Message::text(msg))).expect("Failed to send message");
 
     conn.lock().unwrap().insert(room_id.clone(), Connection::new(user_id.clone(), room_id.clone(), server_tx, internal_tx));
-
 
     tokio::task::spawn( server_rx.forward(user_tx).map(|result| {
         if let Err(e) = result {
@@ -76,7 +75,7 @@ pub async fn create(ws: WebSocket, conn: Connections) {
         user_request_handler(&room_id, &user_id, msg, &conn).await;
     }
 
-    user_disconnected_handler(&user_id, &conn).await;
+    user_disconnected_handler(&room_id, &conn).await;
 }
 
 pub async fn join(ws: WebSocket, room_id: String, conn: Connections) {
@@ -154,7 +153,7 @@ pub async fn internal_request_handler(room_id: &str, msg: Message, conn: &Connec
         eprintln!("{}", msg);
        return; 
     }
-    eprintln!("Successfully fetched internal request of type : {:?}", req.request_type);
+    //eprintln!("Successfully fetched internal request of type : {:?}", req.request_type);
 
     match req.request_type {
         // NOTE
@@ -164,7 +163,7 @@ pub async fn internal_request_handler(room_id: &str, msg: Message, conn: &Connec
         // times before completion.
         IntReqType::TimeOut => {
             if let IntReqValue::TimeOut(time_out) = req.value {
-                eprintln!("Wait for {:?} seconds", time_out.duration);
+                //eprintln!("Wait for {:?} seconds", time_out.duration);
 
                 // Create a new task, namely concurrent workflow
                 // so that timeout delay is done asynchronously
@@ -175,17 +174,27 @@ pub async fn internal_request_handler(room_id: &str, msg: Message, conn: &Connec
                     tokio::time::delay_for(std::time::Duration::from_secs(time_out.duration.as_secs())).await;
 
                     // Get conection
-                    let mut hash = conn_clone.lock().unwrap();
-                    if let Some(connection) = hash.get_mut(&room_id_clone) {
-                        // If state has been extended ignore request and drop.
-                        eprintln!("Timeout");
-                        connection.game.next_state(&time_out.state_id);
+                    if let Ok(mut hash) = conn_clone.lock() {
+                        if let Some(connection) = hash.get_mut(&room_id_clone) {
+                            // If state has been extended ignore request and drop.
+                            eprintln!("Timeout");
+                            connection.game.next_state(&time_out.state_id);
+                        } else {
+                            eprintln!("Skipped request because connection lost");
+                        }
                     } else {
-                        eprintln!("Skipped request because connection lost");
+                        eprintln!("Connection lost, skip timeout");
                     }
                 });
             } else {
-                eprintln!("Cannot not find duration value from timeout request");
+                eprintln!("Cannot find duration value from timeout request");
+            }
+        }
+        IntReqType::GameEnd => {
+            if let Ok(mut hash) = conn.lock() {
+                hash.remove(room_id);
+            } else {
+                eprintln!("Connection lost");
             }
         }
         _ => {}
@@ -212,6 +221,8 @@ pub async fn user_request_handler(room_id: &str, user_id: &str, msg: Message, co
     //eprintln!("Received user request");
     //eprintln!("{:?}", req);
     let mut hash = conn.lock().unwrap();
+    eprintln!("User Request");
+    eprintln!("{:?}", hash.keys());
     if let Some(connection) = hash.get_mut(room_id) {
         // New message from this user, send it to everyone else (except same uid)...
         let pending = connection.game.receive_player_action(&user_id, req);
@@ -225,7 +236,10 @@ pub async fn user_disconnected_handler(room_id: &str, conn: &Connections) {
     eprintln!("User disconnected");
 
     // Stream closed up, so remove from the user list
-    conn.lock().unwrap().remove(room_id);
+    if let Some(connection) = conn.lock().unwrap().remove(room_id) {
+        eprintln!("Dropped");
+        drop(connection);
+    }
 }
 
 pub fn with_conns(conn: Connections) -> impl Filter<Extract = (Connections,), Error = Infallible> + Clone {
