@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 const CARD_MAX_NUMBER: usize = 13;
 const COMB_COUNT: usize = 5;
-const BET_TIME : u64 = 30;
+const BET_TIME : u64 = 60;
 const SHOWDOWN_TIME: u64 = 8;
 const CARD_NUMBER : usize = 14;
 const DEFAULT_HP : u32 = 20;
@@ -92,15 +92,9 @@ impl Game {
             IntReqType::TimeOut, 
             IntReqValue::TimeOut(TimeOut{duration: std::time::Duration::from_secs(BET_TIME), state_id: self.state_id.as_ref().unwrap().clone()})
         ).expect("Failed to create internal request");
-        let result = self.internal_sender.send(Ok(Message::text(req_timeout)));
-        match result {
-            Ok(()) => {
-                eprintln!("Successfully sent internal request");
-            }
-            Err(_) => {
-                eprintln!("Couldn't send internal request");
-            }
-        }
+        if let Err(err) = self.internal_sender.send(Ok(Message::text(req_timeout))) {
+            eprintln!("Couldn't send internal request \n {}", err);
+        };
     }
 
     pub fn init_game(&mut self) {
@@ -117,14 +111,8 @@ impl Game {
             IntReqType::TimeOut, 
             IntReqValue::TimeOut(TimeOut{duration: std::time::Duration::from_secs(BET_TIME), state_id: self.state_id.as_ref().unwrap().clone()})
         ).expect("Failed to create internal request");
-        let result = self.internal_sender.send(Ok(Message::text(req_timeout)));
-        match result {
-            Ok(()) => {
-                eprintln!("Successfully sent internal request");
-            }
-            Err(_) => {
-                eprintln!("Couldn't send internal request");
-            }
+        if let Err(err) = self.internal_sender.send(Ok(Message::text(req_timeout))) {
+            eprintln!("Couldn't send internal request : {}", err);
         }
     }
 
@@ -195,10 +183,10 @@ impl Game {
         // situations. Then error handing should be properly 
         // implemented.
         if self.state_id.as_ref().unwrap() != state_id {
-            eprintln!("State id not equal");
+            eprintln!("State id not equal, ignoring request");
             return;
         }
-        eprintln!("It's pending, step to next state");
+        //eprintln!("It's pending, step to next state");
         self.no_response_check();
         self.change_state(self.state);
     }
@@ -218,13 +206,13 @@ impl Game {
 
     pub fn pending_next_state(&mut self, pending: Pending) {
         if let Pending(Some(state)) = pending {
-            eprintln!("It's pending, step to next state");
+            //eprintln!("It's pending, step to next state");
             self.change_state(state);
         }
     }
 
     fn change_state(&mut self, current_state: GameState) {
-        eprintln!("Change state");
+        //eprintln!("Change state");
         let mut new_card :Option<Card> = None;
         match current_state {
             GameState::Flop => {
@@ -469,13 +457,11 @@ impl Game {
         self.participant.as_mut().unwrap().current_action = PlayerAction::None;
     }
 
-    // TODO Should check this code
-    // lots of copy pasta might be problematic
     fn calculate_showdown(&mut self) {
 
         let mut cmp_result : Ordering = Ordering::Equal;
-        let mut comparison: Ordering = Ordering::Equal;
 
+        // Check if player has folded or not
         if self.creator.stat.fold {
             cmp_result = Ordering::Less;
         } else if self.participant.as_ref().unwrap().stat.fold {
@@ -486,145 +472,157 @@ impl Game {
         let participant_iter = 
             self.community.iter().chain(self.participant.as_ref().unwrap().stat.cards.iter());
 
+        // Create whole card iterator from two iterator 
         let user_card_array = user_iter.cloned().collect::<Vec<Card>>();
         let part_card_array = participant_iter.cloned().collect::<Vec<Card>>();
 
-        let ( user_comb , user_meta ) = CombinationBuilder::get_highest_combination(user_card_array);
-        let ( part_comb , part_meta ) = CombinationBuilder::get_highest_combination(part_card_array);
+        // User_meat mostly means number of high card.
+        let ( user_comb , user_meta ) = 
+            CombinationBuilder::get_highest_combination(user_card_array);
+        let ( part_comb , part_meta ) = 
+            CombinationBuilder::get_highest_combination(part_card_array);
 
+        // If ordering is set either greater or less,
+        // it means someone has folded.
         // If no fold is found then calculate normally.
+        // else don't do comparison
         if let Ordering::Equal = cmp_result {
             cmp_result = (user_comb as u8).cmp(&(part_comb as u8));
         }
 
-        match cmp_result {
-            // user wins
-            Ordering::Greater => {
-                comparison = Ordering::Greater;
-            }
-            // participant wins
-            Ordering::Less => {
-                comparison = Ordering::Less;
-            }
-            // draws or both is high number
-            Ordering::Equal => {
-                if let Some(number) = user_meta {
-                    let user_number = number.parse::<i32>().unwrap_or(0);
-                    let part_number = part_meta.unwrap_or("0".to_string()).parse::<i32>().unwrap_or(0);
+        if let Ordering::Equal =  cmp_result.clone() {
+            // if both player is high card,
+            // compare both numbers.
+            // and set comparison again.
+            if let Some(number) = user_meta {
+                let user_number = number.parse::<i32>().unwrap_or(0);
+                let part_number = part_meta.unwrap_or("0".to_string()).parse::<i32>().unwrap_or(0);
 
-                    let meta_result = user_number.cmp(&part_number).reverse();
-                    match meta_result {
-                        // user wins
-                        Ordering::Greater => {
-                            comparison = Ordering::Greater;
-                        }
-                        // participant wins
-                        Ordering::Less => {
-                            comparison = Ordering::Less;
-                        }
-                        // draws or both is high number
-                        Ordering::Equal => {}
+                let meta_result = user_number.cmp(&part_number).reverse();
+                match meta_result {
+                    // user wins
+                    Ordering::Greater => {
+                        cmp_result = Ordering::Greater;
                     }
+                    // participant wins
+                    Ordering::Less => {
+                        cmp_result = Ordering::Less;
+                    }
+                    // draws or both is high number
+                    Ordering::Equal => {}
                 }
             }
         }
 
         // Cached participant user struct
-        // TODO
-        // Damn.. I forgot this should be refactored
-        // Do real logics
-        match comparison {
-            Ordering::Equal => {
-                let to_creator_response = 
-                    ServerResponse::new_json(
-                        ResponseType::RoundResult, 
-                        ResponseValue::RoundResult(RoundResult {
-                            win: None,
-                            comb: user_comb,
-                            opp_comb: part_comb,
-                            hp: self.creator.stat.hp,
-                            opp_hp: self.participant.as_ref().unwrap().stat.hp,
-                        })
-                    ).expect("Failed to create server reseponse");
-
-                let to_part_response = 
-                    ServerResponse::new_json(
-                        ResponseType::RoundResult, 
-                        ResponseValue::RoundResult(RoundResult {
-                            win: None,
-                            comb: part_comb,
-                            opp_comb: user_comb,
-                            hp: self.participant.as_ref().unwrap().stat.hp,
-                            opp_hp: self.creator.stat.hp,
-                        })
-                    ).expect("Failed to create server reseponse");
-                self.creator.send_message(&to_creator_response);
-                self.participant.as_ref().unwrap().send_message(&to_part_response);
-            }
+        match cmp_result {
             Ordering::Greater => {
                 // Calculate damage 
-                // Cache
+                // Cache required to comply with single reference rule
                 let total_bet  = self.get_total_bet();
-                let left_hp = self.participant.as_mut().unwrap().apply_damage(total_bet);
-                let to_creator_response = 
-                    ServerResponse::new_json(
-                        ResponseType::RoundResult, 
-                        ResponseValue::RoundResult(RoundResult {
-                            win: Some(true),
-                            comb: user_comb,
-                            opp_comb: part_comb,
-                            hp: self.creator.stat.hp,
-                            opp_hp: left_hp,
-                        })
-                    ).expect("Failed to create server reseponse");
-
-                let to_part_response = 
-                    ServerResponse::new_json(
-                        ResponseType::RoundResult, 
-                        ResponseValue::RoundResult(RoundResult {
-                            win: Some(false),
-                            comb: part_comb,
-                            opp_comb: user_comb,
-                            hp: left_hp,
-                            opp_hp: self.creator.stat.hp,
-                        })
-                    ).expect("Failed to create server reseponse");
-                self.creator.send_message(&to_creator_response);
-                self.participant.as_ref().unwrap().send_message(&to_part_response);
+                self.participant.as_mut().unwrap().apply_damage(total_bet);
             }
             Ordering::Less => {
                 // Calculate damage 
-                // Cache
-                let left_hp = self.creator.apply_damage(self.get_total_bet());
-
-                let to_creator_response = 
-                    ServerResponse::new_json(
-                        ResponseType::RoundResult, 
-                        ResponseValue::RoundResult(RoundResult {
-                            win: Some(false),
-                            comb: user_comb,
-                            opp_comb: part_comb,
-                            hp: left_hp,
-                            opp_hp: self.participant.as_ref().unwrap().stat.hp,
-                        })
-                    ).expect("Failed to create server reseponse");
-
-                let to_part_response = 
-                    ServerResponse::new_json(
-                        ResponseType::RoundResult, 
-                        ResponseValue::RoundResult(RoundResult {
-                            win: Some(true),
-                            comb: part_comb,
-                            opp_comb: user_comb,
-                            hp: self.participant.as_ref().unwrap().stat.hp,
-                            opp_hp: left_hp,
-                        })
-                    ).expect("Failed to create server reseponse");
-
-                self.creator.send_message(&to_creator_response);
-                self.participant.as_ref().unwrap().send_message(&to_part_response);
+                self.creator.apply_damage(self.get_total_bet());
             }
+            Ordering::Equal => {}
         }
+        self.send_showdown_result(cmp_result, user_comb, part_comb)
+    }
+
+    fn send_showdown_result(&mut self, comparison: Ordering, user_comb: CardCombination, part_comb: CardCombination) {
+        let mut user_win_check : Option<bool> = None;
+        let mut opp_win_check : Option<bool> = None;
+        match comparison {
+            Ordering::Greater => {
+                user_win_check = Some(true);
+                opp_win_check = Some(false);
+            },
+            Ordering::Less => {
+                user_win_check = Some(false);
+                opp_win_check = Some(true);
+            },
+            _ => {}
+        }
+        let to_creator_response = 
+            ServerResponse::new_json(
+                ResponseType::RoundResult, 
+                ResponseValue::RoundResult(RoundResult {
+                    win: user_win_check,
+                    fold: self.creator.stat.fold,
+                    opp_fold: self.participant.as_ref().unwrap().stat.fold,
+                    comb: user_comb,
+                    opp_comb: part_comb,
+                    hp: self.creator.stat.hp,
+                    opp_hp: self.participant.as_ref().unwrap().stat.hp,
+                })
+            ).expect("Failed to create server reseponse");
+
+        let to_part_response = 
+            ServerResponse::new_json(
+                ResponseType::RoundResult, 
+                ResponseValue::RoundResult(RoundResult {
+                    win: opp_win_check,
+                    fold: self.participant.as_ref().unwrap().stat.fold,
+                    opp_fold: self.creator.stat.fold,
+                    comb: part_comb,
+                    opp_comb: user_comb,
+                    hp: self.participant.as_ref().unwrap().stat.hp,
+                    opp_hp: self.creator.stat.hp,
+                })
+            ).expect("Failed to create server reseponse");
+
+        self.creator.send_message(&to_creator_response);
+        self.participant.as_ref().unwrap().send_message(&to_part_response);
+
+        self.send_game_result();
+    }
+
+    fn send_game_result(&mut self) {
+        let user_game_winner: bool;
+
+        if self.creator.stat.hp == 0 {
+            user_game_winner = true;
+        } else if self.participant.as_ref().unwrap().stat.hp == 0 {
+            user_game_winner = false;
+        } else {
+            return;
+        }
+
+        let to_creator_response = 
+            ServerResponse::new_json(
+                ResponseType::GameResult, 
+                ResponseValue::GameResult(user_game_winner)
+            ).expect("Failed to create server reseponse");
+
+        let to_part_response = 
+            ServerResponse::new_json(
+                ResponseType::GameResult, 
+                ResponseValue::GameResult(!user_game_winner)
+            ).expect("Failed to create server reseponse");
+
+        self.creator.send_message(&to_creator_response);
+        self.participant.as_ref().unwrap().send_message(&to_part_response);
+
+        self.end_game();
+    }
+
+    fn end_game(&mut self) {
+        // change state id so that
+        // timer doesn't called.
+        self.state_id.replace(
+            Uuid::new_v4().to_simple().to_string()
+        );
+
+        let req_timeout =InternalRequest::new_json(
+            IntReqType::GameEnd,
+            IntReqValue::None
+        ).expect("Failed to create internal request");
+        if let Err(err) = self.internal_sender.send(Ok(Message::text(req_timeout))) {
+            eprintln!("Couldn't send internal request \n {}", err);
+        };
+
     }
 }
 
@@ -659,13 +657,17 @@ impl User {
     }
 
     pub fn send_message(&self, msg :&str) {
-        self.sender.send(Ok(Message::text(msg)))
-            .expect("Failed to send message");
+        if let Err(err) = self.sender.send(Ok(Message::text(msg))) {
+            eprintln!("Failed to send message : \n {}", err);
+        }
     }
 
-    pub fn apply_damage(&mut self, damage: u32) -> u32{
-        self.stat.hp -= damage;
-        return self.stat.hp;
+    pub fn apply_damage(&mut self, damage: u32) {
+        if self.stat.hp < damage { 
+            self.stat.hp = 0; 
+        } else {
+            self.stat.hp -= damage;
+        }
     }
 }
 
@@ -821,6 +823,7 @@ pub enum ResponseType {
     Delay,
     BetResult,
     RoundResult,
+    GameResult,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -844,6 +847,7 @@ pub enum ResponseValue {
     State(( GameState , String)),
     BetResult(BetResult),
     RoundResult(RoundResult),
+    GameResult(bool),
     Message(String),
     Card(Vec<Card>),
     Raise(u32),
@@ -895,6 +899,7 @@ pub enum IntReqType {
     None,
     Message,
     TimeOut,
+    GameEnd,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -919,6 +924,8 @@ pub struct BetResult {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RoundResult {
     pub win: Option<bool>,
+    pub fold: bool,
+    pub opp_fold: bool,
     pub comb: CardCombination,
     pub opp_comb: CardCombination,
     pub hp : u32,
