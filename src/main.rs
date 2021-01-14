@@ -3,7 +3,7 @@ mod handlers;
 mod routes;
 mod test;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::collections::HashMap;
 use warp::Filter;
 
@@ -13,7 +13,7 @@ use crate::routes::*;
 #[tokio::main]
 async fn main() {
     // TODO ::: Refacotr Connections from type alias to proper struct 
-    let conn = Connections::new(Mutex::new(HashMap::new()));
+    let conn = Connections::new(RwLock::new(HashMap::new()));
 
     let create_room = routes::create_room(&conn);
     //let get_rooms_list = routes::get_room();

@@ -1,5 +1,5 @@
 use std::convert::Infallible;
-use std::sync::{ Arc , Mutex};
+use std::sync::{ Arc , RwLock};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -9,7 +9,7 @@ use warp::ws::{Message, WebSocket};
 
 use crate::models::{Connection, UserRequest, PlayerAction, ServerResponse, ResponseType, ResponseValue, InternalRequest, IntReqType, IntReqValue};
 
-pub type Connections = Arc<Mutex<HashMap<String, Connection>>>;
+pub type Connections = Arc<RwLock<HashMap<String, Connection>>>;
 
 // This conn is given as clone object so that it is alright to just move conn to nested functions
 pub async fn create_handler(ws: warp::ws::Ws, conn: Connections) -> Result<impl Reply, Infallible> {
@@ -30,13 +30,13 @@ pub async fn create(ws: WebSocket, conn: Connections) {
     let room_id = Uuid::new_v4().to_simple().to_string();
 
     let msg = serde_json::to_string(&ServerResponse{
-            response_type: ResponseType::Message, 
-            value: ResponseValue::Message(format!("Successfully created a room : {}", room_id).to_string())})
-        .expect("Failed to create json object");
+        response_type: ResponseType::RoomId, 
+        value: ResponseValue::Message(format!("{}", room_id).to_string())}
+    ).expect("Failed to create json object");
 
     server_tx.send(Ok(Message::text(msg))).expect("Failed to send message");
 
-    conn.lock().unwrap().insert(room_id.clone(), Connection::new(user_id.clone(), room_id.clone(), server_tx, internal_tx));
+    conn.write().unwrap().insert(room_id.clone(), Connection::new(user_id.clone(), room_id.clone(), server_tx, internal_tx));
 
     tokio::task::spawn( server_rx.forward(user_tx).map(|result| {
         if let Err(e) = result {
@@ -92,7 +92,8 @@ pub async fn join(ws: WebSocket, room_id: String, conn: Connections) {
         }
     }));
 
-    if let Some(connection) = conn.lock().unwrap().get_mut(&room_id) {
+    // If room exists
+    if let Some(connection) = conn.write().unwrap().get_mut(&room_id) {
 
         let msg = serde_json::to_string(&ServerResponse{
             response_type: ResponseType::Message, 
@@ -109,8 +110,8 @@ pub async fn join(ws: WebSocket, room_id: String, conn: Connections) {
     } else {
         // Reject
         let msg = serde_json::to_string(&ServerResponse{
-            response_type: ResponseType::Message, 
-            value: ResponseValue::Message("Failed to join room".to_string())})
+            response_type: ResponseType::Error, 
+            value: ResponseValue::Message("There is no such room with given id.".to_string())})
             .expect("Failed to create json object");
 
         server_tx.send(Ok(Message::text(msg))).expect("Failed to send message");
@@ -174,7 +175,7 @@ pub async fn internal_request_handler(room_id: &str, msg: Message, conn: &Connec
                     tokio::time::delay_for(std::time::Duration::from_secs(time_out.duration.as_secs())).await;
 
                     // Get conection
-                    if let Ok(mut hash) = conn_clone.lock() {
+                    if let Ok(mut hash) = conn_clone.write() {
                         if let Some(connection) = hash.get_mut(&room_id_clone) {
                             // If state has been extended ignore request and drop.
                             eprintln!("Timeout");
@@ -191,7 +192,7 @@ pub async fn internal_request_handler(room_id: &str, msg: Message, conn: &Connec
             }
         }
         IntReqType::GameEnd => {
-            if let Ok(mut hash) = conn.lock() {
+            if let Ok(mut hash) = conn.write() {
                 hash.remove(room_id);
             } else {
                 eprintln!("Connection lost");
@@ -220,7 +221,7 @@ pub async fn user_request_handler(room_id: &str, user_id: &str, msg: Message, co
 
     //eprintln!("Received user request");
     //eprintln!("{:?}", req);
-    let mut hash = conn.lock().unwrap();
+    let mut hash = conn.write().unwrap();
     eprintln!("User Request");
     eprintln!("{:?}", hash.keys());
     if let Some(connection) = hash.get_mut(room_id) {
@@ -236,8 +237,18 @@ pub async fn user_disconnected_handler(room_id: &str, conn: &Connections) {
     eprintln!("User disconnected");
 
     // Stream closed up, so remove from the user list
-    if let Some(connection) = conn.lock().unwrap().remove(room_id) {
+    if let Some(connection) = conn.write().unwrap().remove(room_id) {
         eprintln!("Dropped");
+        // If participant exists broadcast_message which technically means send message to 
+        // user who is still in connection.
+        // Message is not being sent to user who has been disconnected since connection is lost.
+        if let Some(_) = connection.game.participant {
+            let res = ServerResponse::new_json(
+                ResponseType::Error, 
+                ResponseValue::Message("Opponent player disconnected".to_string())
+            ).expect("Failed to create server response");
+            connection.game.broadcast_message(&res);
+        }
         drop(connection);
     }
 }

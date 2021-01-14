@@ -188,6 +188,7 @@ impl Game {
         }
         //eprintln!("It's pending, step to next state");
         self.no_response_check();
+        self.end_bet();
         self.change_state(self.state);
     }
 
@@ -819,6 +820,8 @@ pub enum ResponseType {
     Community,
     Hand,
     Message,
+    Error,
+    RoomId,
     Raise,
     Delay,
     BetResult,
