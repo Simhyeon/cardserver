@@ -294,7 +294,6 @@ impl Game {
         match req.action {
             PlayerAction::Fold => {
                 user.fold();
-                opp.current_action = PlayerAction::Check;
             }
             PlayerAction::Message => {
                 if uid == user.id {
@@ -495,9 +494,9 @@ impl Game {
             // if both player is high card,
             // compare both numbers.
             // and set comparison again.
-            if let Some(number) = user_meta {
+            if let Some(number) = &user_meta {
                 let user_number = number.parse::<i32>().unwrap_or(0);
-                let part_number = part_meta.unwrap_or("0".to_string()).parse::<i32>().unwrap_or(0);
+                let part_number = part_meta.clone().unwrap_or("0".to_string()).parse::<i32>().unwrap_or(0);
 
                 let meta_result = user_number.cmp(&part_number).reverse();
                 match meta_result {
@@ -529,10 +528,10 @@ impl Game {
             }
             Ordering::Equal => {}
         }
-        self.send_showdown_result(cmp_result, user_comb, part_comb)
+        self.send_showdown_result(cmp_result, user_comb, user_meta,part_comb, part_meta);
     }
 
-    fn send_showdown_result(&mut self, comparison: Ordering, user_comb: CardCombination, part_comb: CardCombination) {
+    fn send_showdown_result(&mut self, comparison: Ordering, user_comb: CardCombination, user_meta: Option<String>, part_comb: CardCombination, opp_meta : Option<String>) {
         let mut user_win_check : Option<bool> = None;
         let mut opp_win_check : Option<bool> = None;
         match comparison {
@@ -554,7 +553,9 @@ impl Game {
                     fold: self.creator.stat.fold,
                     opp_fold: self.participant.as_ref().unwrap().stat.fold,
                     comb: user_comb,
+                    user_meta :user_meta.clone(),
                     opp_comb: part_comb,
+                    opp_meta: opp_meta.clone(),
                     hp: self.creator.stat.hp,
                     opp_hp: self.participant.as_ref().unwrap().stat.hp,
                 })
@@ -568,7 +569,9 @@ impl Game {
                     fold: self.participant.as_ref().unwrap().stat.fold,
                     opp_fold: self.creator.stat.fold,
                     comb: part_comb,
+                    user_meta,
                     opp_comb: user_comb,
+                    opp_meta,
                     hp: self.participant.as_ref().unwrap().stat.hp,
                     opp_hp: self.creator.stat.hp,
                 })
@@ -584,9 +587,9 @@ impl Game {
         let user_game_winner: bool;
 
         if self.creator.stat.hp == 0 {
-            user_game_winner = true;
-        } else if self.participant.as_ref().unwrap().stat.hp == 0 {
             user_game_winner = false;
+        } else if self.participant.as_ref().unwrap().stat.hp == 0 {
+            user_game_winner = true;
         } else {
             return;
         }
@@ -653,7 +656,6 @@ impl User {
     }
 
     pub fn fold(&mut self) {
-        self.stat.bet = 0;
         self.stat.fold = true;
     }
 
@@ -930,7 +932,9 @@ pub struct RoundResult {
     pub fold: bool,
     pub opp_fold: bool,
     pub comb: CardCombination,
+    pub user_meta: Option<String>,
     pub opp_comb: CardCombination,
+    pub opp_meta: Option<String>,
     pub hp : u32,
     pub opp_hp : u32,
 }
