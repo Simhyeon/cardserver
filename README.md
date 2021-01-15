@@ -1,5 +1,7 @@
 ### Simple game server for demonstration
 
+Card client : [Client](https://github.com/simhyeon/cardclient)
+
 ### Crates used
 
 - Warp  : Websocket
