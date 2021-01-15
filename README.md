@@ -1,7 +1,8 @@
 ### Simple game server for demonstration
 
 demo : [youtube](https://youtu.be/eTygwHH1sW4)
-Card client : [Client](https://github.com/simhyeon/cardclient)
+
+Card client repo: [github](https://github.com/simhyeon/cardclient)
 
 ### Crates used
 
