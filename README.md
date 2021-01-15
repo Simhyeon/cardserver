@@ -7,7 +7,7 @@ Card client : [Client](https://github.com/simhyeon/cardclient)
 - Warp  : Websocket
 - Tokio : Async execution
 - Scrum : Easy enum type manipulation
-- serde : Easy rust struct convertion into json format
+- serde : Easy rust struct conversion into json format
 - uuid  : Making a unique identifier for game rooms
 
 ### How it works
@@ -24,7 +24,7 @@ After river state, server calculates both players' card combination and send rou
 
 ##### Flow Chart
 
-![Basics](./img/basic_flow.png)
+![Basics](./img/server_flow.png)
 
 ### Technical details
 
