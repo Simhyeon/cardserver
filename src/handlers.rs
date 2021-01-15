@@ -51,7 +51,7 @@ pub async fn create(ws: WebSocket, conn: Connections) {
     tokio::task::spawn(
         async move{
             while let Some(result) = internal_rx.next().await {
-                eprintln!("Internal message");
+                //println!("Internal message");
                 let msg = match result {
                     Ok(msg) => msg,
                     Err(e) => {
@@ -94,6 +94,17 @@ pub async fn join(ws: WebSocket, room_id: String, conn: Connections) {
 
     // If room exists
     if let Some(connection) = conn.write().unwrap().get_mut(&room_id) {
+
+        if let Some(_) = connection.game.participant {
+            // Already room is full
+            let msg = serde_json::to_string(&ServerResponse{
+                response_type: ResponseType::Error, 
+                value: ResponseValue::Message(format!("Currently room is full").to_string())})
+                .expect("Failed to create json object");
+
+            server_tx.send(Ok(Message::text(msg))).expect("Failed to send message");
+            return;
+        }
 
         let msg = serde_json::to_string(&ServerResponse{
             response_type: ResponseType::Message, 
@@ -178,7 +189,7 @@ pub async fn internal_request_handler(room_id: &str, msg: Message, conn: &Connec
                     if let Ok(mut hash) = conn_clone.write() {
                         if let Some(connection) = hash.get_mut(&room_id_clone) {
                             // If state has been extended ignore request and drop.
-                            eprintln!("Timeout");
+                            //eprintln!("Timeout");
                             connection.game.next_state(&time_out.state_id);
                         } else {
                             eprintln!("Skipped request because connection lost");
@@ -222,8 +233,6 @@ pub async fn user_request_handler(room_id: &str, user_id: &str, msg: Message, co
     //eprintln!("Received user request");
     //eprintln!("{:?}", req);
     let mut hash = conn.write().unwrap();
-    eprintln!("User Request");
-    eprintln!("{:?}", hash.keys());
     if let Some(connection) = hash.get_mut(room_id) {
         // New message from this user, send it to everyone else (except same uid)...
         let pending = connection.game.receive_player_action(&user_id, req);
@@ -238,7 +247,6 @@ pub async fn user_disconnected_handler(room_id: &str, conn: &Connections) {
 
     // Stream closed up, so remove from the user list
     if let Some(connection) = conn.write().unwrap().remove(room_id) {
-        eprintln!("Dropped");
         // If participant exists broadcast_message which technically means send message to 
         // user who is still in connection.
         // Message is not being sent to user who has been disconnected since connection is lost.

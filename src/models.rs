@@ -183,10 +183,9 @@ impl Game {
         // situations. Then error handing should be properly 
         // implemented.
         if self.state_id.as_ref().unwrap() != state_id {
-            eprintln!("State id not equal, ignoring request");
+            //State id not equal, ignoring request
             return;
         }
-        //eprintln!("It's pending, step to next state");
         self.no_response_check();
         self.end_bet();
         self.change_state(self.state);
@@ -207,13 +206,11 @@ impl Game {
 
     pub fn pending_next_state(&mut self, pending: Pending) {
         if let Pending(Some(state)) = pending {
-            //eprintln!("It's pending, step to next state");
             self.change_state(state);
         }
     }
 
     fn change_state(&mut self, current_state: GameState) {
-        //eprintln!("Change state");
         let mut new_card :Option<Card> = None;
         match current_state {
             GameState::Flop => {
@@ -225,7 +222,6 @@ impl Game {
                 new_card.replace(self.add_community());
             }
             GameState::River | GameState::Fold => {
-                eprintln!("SHOWDOWN!");
                 self.state = GameState::ShowDown;
                 self.calculate_showdown();
             }
@@ -335,9 +331,7 @@ impl Game {
                         ).expect("Failed to create internal request");
                         let result = self.internal_sender.send(Ok(Message::text(req_timeout)));
                         match result {
-                            Ok(()) => {
-                                eprintln!("Successfully sent internal request");
-                            }
+                            Ok(()) => {}
                             Err(_) => {
                                 eprintln!("Couldn't send internal request");
                             }
@@ -439,7 +433,7 @@ impl Game {
 
     fn clear_user_bet(&mut self) {
         if let None =self.participant {
-            eprintln!("Invalid work flow should call function clear_user_bet when participant is not empty");
+            eprintln!("Invalid work flow. Cannot call function clear_user_bet when participant is not empty");
             return;
         }
 
@@ -450,7 +444,7 @@ impl Game {
     }
     fn clear_user_action(&mut self) {
         if let None =self.participant {
-            eprintln!("Invalid work flow should call function clear_user_action when participant is not empty");
+            eprintln!("Invalid work flow Cannot call function clear_user_action when participant is not empty");
             return;
         }
         self.creator.current_action = PlayerAction::None;
